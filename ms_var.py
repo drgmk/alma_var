@@ -3,6 +3,7 @@ import shutil
 import datetime
 import logging
 import numpy as np
+import scipy.stats
 import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
@@ -13,7 +14,7 @@ def mjd2date(d):
     return t0 + dt
 
 
-def export_ms(msfilename, tb, ms):
+def export_ms(msfilename, tb, ms, xcor=True, acor=False):
     '''Return visibilities etc.
 
     Direct copy of Luca Matra's export.'''
@@ -40,8 +41,8 @@ def export_ms(msfilename, tb, ms):
 
     ms.open(msfilename)
     spw_info = ms.getspectralwindowinfo()
-    nchan = spw_info["0"]["NumChan"]
-    npol = spw_info["0"]["NumCorr"]
+    nchan = spw_info[list(spw_info.keys())[0]]['NumChan']
+    npol  = spw_info[list(spw_info.keys())[0]]['NumCorr']
     ms.close()
     logging.info("with "+str(nchan)+" channels per SPW and "+str(npol)+" polarizations,")
 
@@ -91,8 +92,15 @@ def export_ms(msfilename, tb, ms):
     # antennas as opposed to auto-correlation of a single antenna.
     # We don't care about the latter so we don't want it.
     xc = np.where(ant1 != ant2)[0]
+    ac = np.where(ant1 == ant2)[0]
+    if xcor:
+        xc = xc
+        if acor:
+            xc = np.logical_or(xc, ac)
+    elif acor:
+        xc = ac
 
-    # Select only cross-correlation data
+    # Select data
     time = time[xc]
     scan = scan[xc]
     data_real = Re[:,xc]
@@ -128,11 +136,20 @@ def export_ms(msfilename, tb, ms):
     return data_uu, data_vv, vis, data_wgts, time
     
 
-def var_search(msfile, keep_avg_ms=True, keep_scan_ms=False, keep_scan_npy=True):
+def var_search(msfilepath, outdir=None,
+               keep_avg_ms=True, keep_scan_ms=False, keep_scan_npy=True):
 
+    msfilepath = msfilepath.strip('/')
+    outdir = outdir.strip('/')
+    
+    msfile = os.path.basename(msfilepath)
+    msloc = os.path.dirname(msfilepath)
     logging.info(f'running search for {msfile}')
 
-    wdir = f'{msfile}.var'
+    if outdir:
+        wdir = f'{outdir}/{msfile}.var'
+    else:
+        wdir = f'{msfilepath}.var'
     if not os.path.exists(wdir):
         os.mkdir(wdir)
         
@@ -141,27 +158,40 @@ def var_search(msfile, keep_avg_ms=True, keep_scan_ms=False, keep_scan_npy=True)
         os.mkdir(scandir)
 
     # get spw info
-    ms.open(msfile)
+    ms.open(msfilepath)
     spw_info = ms.getspectralwindowinfo()
     ms.close()
+    
+    # details, so we can exclude most data
+    # TDM/FDM corresponds to FULL_RES (not SQLD or CH_AVG)
+    msmd.open(msfilepath)
+    spws = {}
+    spws['tfdm'] = msmd.almaspws(tdm=True, fdm=True)
+    spws['sqld'] = msmd.almaspws(sqld=True)
+    spws['chavg'] = msmd.almaspws(chavg=True)
+    logging.info(spws)
+    msmd.close()
 
-    # average down to one channel per spw
+    # average down to one channel per spw from FULL_RES
     # output is in DATA column
     spw_list = []
     avg_list = []
     for k in spw_info.keys():
-        spw_list.append( spw_info[k]['SpectralWindowId'] )
-        avg_list.append( spw_info[k]['NumChan'])
+        spwid = spw_info[k]['SpectralWindowId']
+        if spwid in spws['tfdm']:
+            spw_list.append( spwid )
+            avg_list.append( spw_info[k]['NumChan'])
         
     ms_avg = f'{wdir}/{msfile}.avg'
     if not os.path.exists(ms_avg):
-        tb.open(msfile)
+        tb.open(msfilepath)
         datacol = 'CORRECTED'
         if 'CORRECTED' not in tb.colnames():
             datacol = 'DATA'
             
         logging.info(f'averaging {msfile}, using {datacol}')
-        split(vis=msfile, outputvis=ms_avg, keepflags=False,
+        logging.info(f'keeping spws:{spw_list}, widths:{avg_list}')
+        split(vis=msfilepath, outputvis=ms_avg, keepflags=False,
               spw=','.join([str(s) for s in spw_list]), width=avg_list,
               datacolumn=datacol)
         tb.close()
@@ -171,159 +201,180 @@ def var_search(msfile, keep_avg_ms=True, keep_scan_ms=False, keep_scan_npy=True)
     scan_info = ms.getscansummary()
     ms.close()
 
+    # get spws in averaged data, generally only interested in TDM/FDM
+    # and others may have been excluded above already anyway
+    # extra keys here will give extra sets of output
+    msmd.open(ms_avg)
+    spws = {}
+    spws['tfdm'] = msmd.almaspws(tdm=True, fdm=True)
+    msmd.close()
+
     # process by scan
     scans_sorted = [int(s) for s in scan_info.keys()]
     scans_sorted.sort()
     for scan_no in scans_sorted:
 
-        scan_str = f'scan_{int(scan_no):02d}'
+        field_name = None
+
         scan_no_dir = f'{scandir}/{scan_no}'
-        scan_output =f'{scan_no_dir}/{scan_str}'
         if not os.path.exists(scan_no_dir):
             os.mkdir(scan_no_dir)
             
-        npy_avg_scan = f'{scan_no_dir}/{scan_str}.npy'
-        ms_avg_scan = f'{scan_no_dir}/{scan_str}.ms'
-        
-        if not os.path.exists(npy_avg_scan):
-        
-            logging.info(f'splitting scan {scan_no} from {ms_avg_scan}')
-            if not os.path.exists(ms_avg_scan):
-                split(vis=ms_avg, outputvis=ms_avg_scan, scan=scan_no, datacolumn='DATA')
+        # process by spw type
+        for spw in spws.keys():
 
-            # get data from ms
-            u, v, vis, wt, time = export_ms(ms_avg_scan, tb, ms)
+            if len(spws[spw]) == 0:
+                continue
 
-            # field info to link things
-            msmd.open(ms_avg_scan)
-            field_id = msmd.fieldsforscan(int(scan_no))
-            if len(field_id) > 1:
-                logging.warning(f'{len(field_id)} fields for scan {s}')
+            scan_str = f'scan_{int(scan_no):02d}_{spw}'
+            npy_avg_scan = f'{scan_no_dir}/{scan_str}.npy'
+            ms_avg_scan = f'{scan_no_dir}/{scan_str}.ms'
+            scan_output =f'{scan_no_dir}/{scan_str}'
 
-            field_name = msmd.namesforfields(field_id)
-            if len(field_name) > 1:
-                logging.warning(f'{len(field_name)} fields for scan {s}')
-            field_name = field_name[0]
-            msmd.close()
+            if not os.path.exists(npy_avg_scan):
             
-            np.save(npy_avg_scan, np.array([u, v, vis, wt, time, field_name], dtype=object))
+                logging.info(f'splitting scan {scan_no} from {ms_avg_scan}')
+                    
+                if not os.path.exists(ms_avg_scan):
+                    split(vis=ms_avg, outputvis=ms_avg_scan, scan=scan_no, datacolumn='DATA',
+                          spw=','.join([str(s) for s in spws[spw]]))
 
-        else:
-            logging.info(f'loading visibilites from {npy_avg_scan}')
-            u, v, vis, wt, time, field_name = np.load(npy_avg_scan, allow_pickle=True)
+                # get data from ms
+                u, v, vis, wt, time = export_ms(ms_avg_scan, tb, ms)
 
-        if not keep_scan_npy:
-            os.unlink(npy_avg_scan)
+                # field info to link things
+                if field_name is None:
+                    msmd.open(ms_avg_scan)
+                    field_id = msmd.fieldsforscan(int(scan_no))
+                    if len(field_id) > 1:
+                        logging.warning(f'{len(field_id)} fields for scan {s}')
 
-        if not keep_scan_ms and os.path.exists(ms_avg_scan):
-            shutil.rmtree(ms_avg_scan)
-
-        if len(vis) == 0:
-            logging.info(f'{scan_no}: no visibilities')
-            continue
-
-        # reweighting as suggested by Loomis+
-        # unclear where factor 0.5 w.r.t. above comes from probably no of d.o.f
-        # 2 dof would be: rew = 2*len(w) / np.sum( (Re**2.0 + Im**2.0) * w )
-        wgt_mean = np.mean(wt)
-        data_std = np.std(vis)
-        rew = (1/data_std**2)/wgt_mean
-        logging.info(f'reweighting value (1dof): {rew}')
-        wt *= rew
-
-        # check visiblity weights sensible
-        # multiply by sqrt(2) assuming Re and Im independent
-        fig, ax = plt.subplots(1, 2, figsize=(8,4), sharey=True)
-        _ = ax[0].hist(np.sqrt(2)*vis.real*np.sqrt(wt), bins=100, density=True, label='Real')
-        _ = ax[1].hist(np.sqrt(2)*vis.imag*np.sqrt(wt), bins=100, density=True, label='Imag')
-        x = np.linspace(-3,3)
-        for a in ax:
-            a.plot(x, np.max(_[0])*np.exp(-(x**2)/2))
-            a.set_xlabel('snr per visibility')
-            a.legend()
-        ax[0].set_ylabel('density')
-        fig.savefig(f'{scan_output}.vis_snr.png')
-        plt.close(fig)
-
-        # absolute sum of weighted visibilities
-        # (point source variability with no location)
-        # unique returns sorted times
-        times = np.unique(time)
-
-        # times in minutes
-        tplot1 = (time-np.min(time))*24*60
-        tplot2 = (times-np.min(times))*24*60
-        Dt = np.max(times) - np.min(times)*24*60
-        dt = np.median(np.diff(times))*24*60*60 # dt in seconds
-
-        v_abs = []
-        for t in times:
-            ok = time == t
-            v_abs.append( np.dot( np.abs(vis[ok]), np.sqrt(wt[ok])) )
-            
-        v_abs = np.array(v_abs)
-
-        # plot output
-        fig, ax = plt.subplots(2, sharex=True, figsize=(8,4))
-        ax[0].plot(tplot1, vis.real, '.', label='Real', markersize=0.3)
-        ax[1].plot(tplot2, np.abs(v_abs), '.', label='$|Sum(V.w)|$')
-        ax[1].set_xlabel('Time / minutes')
-        ax[0].set_ylabel('Real')
-        ax[1].set_ylabel('$|Sum(V.w)|$')
-        fig.tight_layout()
-        fig.savefig(f'{scan_output}.vis_time.png')
-        plt.close(fig)
-
-        # smooth light curve
-        nw = 60
-        if len(times) < 60:
-            nw = len(times)//2
-        ws = np.arange(nw)+1
-        T = np.zeros((nw,len(times)))
-        wpk = []
-        pk = []
-        
-        vmin = 1e5
-        for i,wi in enumerate(ws):
-            conv = np.convolve(v_abs, np.repeat(1,wi)/wi, mode='valid')
-            conv = (conv-np.mean(conv))*np.sqrt(wi) + np.mean(conv)
-            T[i, (wi-1)//2:len(v_abs)-wi//2] = conv
-
-            # find significant +ve outliers
-            clipped, _, _ = scipy.stats.sigmaclip(conv)
-            mn, std = np.mean(clipped), np.std(clipped)
-            ok = np.where(T[i] > mn + 3*std)[0]
-            for o in ok:
-                wpk.append(wi)
-                pk.append(tplot2[o])
+                    field_name = msmd.namesforfields(field_id)
+                    if len(field_name) > 1:
+                        logging.warning(f'{len(field_name)} fields for scan {s}')
+                    field_name = field_name[0]
+                    msmd.close()
                 
-            if np.min(conv) < vmin:
-                vmin = np.min(conv)
-            
-        wpk = np.array(wpk)
-        pk = np.array(pk)
+                np.save(npy_avg_scan, np.array([u, v, vis, wt, time, field_name], dtype=object))
 
-        fig, ax = plt.subplots(2, figsize=(8,6), sharex=True,
-                               gridspec_kw={'height_ratios':[2,1]})
-        ax[0].imshow(T, aspect='auto', origin='lower', vmin=vmin,
-                     extent=(np.min(tplot2), np.max(tplot2),
-                             np.min(ws)-0.5, np.max(ws)+0.5))
-        ax[0].plot(pk, wpk, '+w')
-        ax[1].plot(tplot2, np.abs(v_abs), '.', label='$|Sum(V.w)|$')
-        ax[1].set_xlabel('Time / minutes')
-        ax[1].set_ylabel('$|Sum(V.w)|$')
-        ax[0].set_ylabel(f'smoothing width / $\Delta t$={dt:3.2f} seconds')
-        fig.tight_layout()
-        fig.savefig(f'{scan_output}.vis_time_smooth.png')
-        plt.close(fig)
-        
-        field_dir = f'{wdir}/{field_name}'
-        if not os.path.exists(field_dir):
-            os.mkdir(field_dir)
+            else:
+                logging.info(f'loading visibilites from {npy_avg_scan}')
+                u, v, vis, wt, time, field_name = np.load(npy_avg_scan, allow_pickle=True)
+
+            if not keep_scan_npy:
+                os.unlink(npy_avg_scan)
+
+            if not keep_scan_ms and os.path.exists(ms_avg_scan):
+                shutil.rmtree(ms_avg_scan)
+
+            if len(vis) == 0:
+                logging.info(f'{scan_no}: no visibilities')
+                continue
+
+            # reweighting as suggested by Loomis+
+            # unclear where factor 0.5 w.r.t. above comes from probably no of d.o.f
+            # 2 dof would be: rew = 2*len(w) / np.sum( (Re**2.0 + Im**2.0) * w )
+            wgt_mean = np.mean(wt)
+            data_std = np.std(vis)
+            rew = (1/data_std**2)/wgt_mean
+            logging.info(f'reweighting value (1dof): {rew}')
+            wt *= rew
+
+            # check visiblity weights sensible
+            # multiply by sqrt(2) assuming Re and Im independent
+            fig, ax = plt.subplots(1, 2, figsize=(8,4), sharey=False)
+            _ = ax[0].hist(np.sqrt(2)*vis.real*np.sqrt(wt), bins=100, density=True, label='Real')
+            _ = ax[1].hist(np.sqrt(2)*vis.imag*np.sqrt(wt), bins=100, density=True, label='Imag')
+            x = np.linspace(-3,3)
+            for a in ax:
+                a.plot(x, np.max(_[0])*np.exp(-(x**2)/2))
+                a.set_xlabel('snr per visibility')
+                a.legend()
+            ax[0].set_ylabel('density')
+            fig.savefig(f'{scan_output}.vis_snr.png')
+            plt.close(fig)
+
+            # absolute sum of weighted visibilities
+            # (point source variability with no location)
+            # unique returns sorted times
+            times = np.unique(time)
+
+            # times in minutes
+            tplot1 = (time-np.min(time))*24*60
+            tplot2 = (times-np.min(times))*24*60
+            Dt = np.max(times) - np.min(times)*24*60
+            dt = np.median(np.diff(times))*24*60*60 # dt in seconds
+
+            v_abs = []
+            for t in times:
+                ok = time == t
+                v_abs.append( np.dot( np.abs(vis[ok]), np.sqrt(wt[ok])) )
+                
+            v_abs = np.array(v_abs)
+
+            # plot output
+            fig, ax = plt.subplots(2, sharex=True, figsize=(8,4))
+            ax[0].plot(tplot1, vis.real, '.', label='Real', markersize=0.3)
+            ax[1].plot(tplot2, np.abs(v_abs), '.', label='$|Sum(V.w)|$')
+            ax[1].set_xlabel('Time / minutes')
+            ax[0].set_ylabel('Real')
+            ax[1].set_ylabel('$|Sum(V.w)|$')
+            fig.tight_layout()
+            fig.savefig(f'{scan_output}.vis_time.png')
+            plt.close(fig)
+
+            # smooth light curve
+            nw = 60
+            if len(times) < 60:
+                nw = len(times)//2
+            ws = np.arange(nw)+1
+            T = np.zeros((nw,len(times)))
+            wpk = []
+            pk = []
             
-        linked = f'{field_dir}/{scan_str}.vis_time_smooth.png'
-        if not os.path.exists(linked):
-            os.symlink(os.path.abspath(f'{scan_output}.vis_time_smooth.png'), linked)
+            vmin = 1e5
+            for i,wi in enumerate(ws):
+                conv = np.convolve(v_abs, np.repeat(1,wi)/wi, mode='valid')
+                conv = (conv-np.mean(conv))*np.sqrt(wi) + np.mean(conv)
+                T[i, (wi-1)//2:len(v_abs)-wi//2] = conv
+
+                # find significant +ve outliers
+                clipped, _, _ = scipy.stats.sigmaclip(conv)
+                mn, std = np.mean(clipped), np.std(clipped)
+                ok = np.where(T[i] > mn + 3*std)[0]
+                for o in ok:
+                    wpk.append(wi)
+                    pk.append(tplot2[o])
+                    
+                if np.min(conv) < vmin:
+                    vmin = np.min(conv)
+                
+            wpk = np.array(wpk)
+            pk = np.array(pk)
+
+            fig, ax = plt.subplots(2, figsize=(8,6), sharex=True,
+                                   gridspec_kw={'height_ratios':[2,1]})
+            ax[0].imshow(T, aspect='auto', origin='lower', vmin=vmin,
+                         extent=(np.min(tplot2), np.max(tplot2),
+                                 np.min(ws)-0.5, np.max(ws)+0.5))
+            ax[0].plot(pk, wpk, '+w')
+            ax[1].plot(tplot2, np.abs(v_abs), '.', label='$|Sum(V.w)|$')
+            ax[1].set_xlabel('Time / minutes')
+            ax[1].set_ylabel('$|Sum(V.w)|$')
+            ax[0].set_ylabel(f'smoothing width / $\Delta t$={dt:3.2f} seconds')
+            fig.tight_layout()
+            fig.savefig(f'{scan_output}.vis_time_smooth.png')
+            plt.close(fig)
+            
+            field_dir = f'{wdir}/{field_name}'
+            if not os.path.exists(field_dir):
+                os.mkdir(field_dir)
+                
+            link = f'{field_dir}/{scan_str}.vis_time_smooth.png'
+            link_rel = os.path.relpath(scan_no_dir, field_dir)
+            linked = f'{link_rel}/{scan_str}.vis_time_smooth.png'
+            if not os.path.exists(link):
+                os.symlink(linked, link)
 
     if not keep_avg_ms and os.path.exists(ms_avg):
         shutil.rmtree(ms_avg)
