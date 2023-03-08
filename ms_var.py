@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
 
+
 def mjd2date(d):
     t0 = datetime.datetime(1, 1, 1, 12)
     dt = datetime.timedelta(2400000.5 + d - 1721426.0)
@@ -15,11 +16,11 @@ def mjd2date(d):
 
 
 def export_ms(msfilename, tb, ms, xcor=True, acor=False):
-    '''Return visibilities etc.
+    """Return visibilities etc.
 
-    Direct copy of Luca Matra's export.'''
+    Direct copy of Luca Matra's export."""
 
-    cc=2.9979e10 #cm/s
+    cc = 2.9979e10  # cm/s
 
     # Use CASA table tools to get columns of UVW, DATA, WEIGHT, etc.
     tb.open(msfilename)
@@ -57,17 +58,18 @@ def export_ms(msfilename, tb, ms, xcor=True, acor=False):
     logging.info("corresponding to "+str(2.9979e8/rfreq[0]*1e3)+" mm")
     logging.info("Average wavelength is "+str(2.9979e8/np.average(rfreq)*1e3)+" mm")
 
-    logging.info("Datasets has baselines between "+str(np.min(np.sqrt(uvw[0,:]**2.0+uvw[1,:]**2.0)))+" and "+str(np.max(np.sqrt(uvw[0,:]**2.0+uvw[1,:]**2.0)))+" m")
+    logging.info("Datasets has baselines between "+str(np.min(np.sqrt(uvw[0, :]**2.0+uvw[1, :]**2.0))) +
+                 " and "+str(np.max(np.sqrt(uvw[0, :]**2.0+uvw[1, :]**2.0)))+" m")
 
-    #Initialize u and v arrays (coordinates in Fourier space)
-    uu=np.zeros((freqs.shape[0],uvw[0,:].size))
-    vv=np.zeros((freqs.shape[0],uvw[0,:].size))
+    # Initialize u and v arrays (coordinates in Fourier space)
+    uu = np.zeros((freqs.shape[0], uvw[0, :].size))
+    vv = np.zeros((freqs.shape[0], uvw[0, :].size))
 
-    #Fill u and v arrays appropriately from data values.
+    # Fill u and v arrays appropriately from data values.
     for i in np.arange(freqs.shape[0]):
         for j in np.arange(uvw.shape[1]):
-            uu[i,j]=uvw[0,j]*freqs[i,spwid[j]]/(cc/100.0)
-            vv[i,j]=uvw[1,j]*freqs[i,spwid[j]]/(cc/100.0)
+            uu[i, j] = uvw[0, j]*freqs[i, spwid[j]]/(cc/100.0)
+            vv[i, j] = uvw[1, j]*freqs[i, spwid[j]]/(cc/100.0)
 
     # Extract real and imaginary part of the visibilities at all u-v
     # coordinates, for both polarization states (XX and YY), extract
@@ -102,25 +104,25 @@ def export_ms(msfilename, tb, ms, xcor=True, acor=False):
 
     # Select data
     time = time[xc]
-    scan = scan[xc]
+    # scan = scan[xc]
     data_real = Re[:,xc]
     data_imag = Im[:,xc]
     flags = flags[:,xc]
     data_wgts = wgts[xc]
     data_uu = uu[:,xc]
     data_vv = vv[:,xc]
-    data_wgts=np.reshape(np.repeat(wgts[xc], uu.shape[0]), data_uu.shape)
+    data_wgts = np.reshape(np.repeat(wgts[xc], uu.shape[0]), data_uu.shape)
 
     # Select only data that is NOT flagged, this step has the unexpected
     # effect of flattening the arrays to 1d
     data_real = data_real[np.logical_not(flags)]
     data_imag = data_imag[np.logical_not(flags)]
-    flagss = flags[np.logical_not(flags)]
+    flags_ = flags[np.logical_not(flags)]
     data_wgts = data_wgts[np.logical_not(flags)]
     data_uu = data_uu[np.logical_not(flags)]
     data_vv = data_vv[np.logical_not(flags)]
     time = time[np.logical_not(flags[0])]
-    scan = scan[np.logical_not(flags[0])]
+    # scan = scan[np.logical_not(flags[0])]
 
     time /= (24*60*60) # to MJD
     vis = data_real + 1j*data_imag
@@ -136,6 +138,95 @@ def export_ms(msfilename, tb, ms, xcor=True, acor=False):
     return data_uu, data_vv, vis, data_wgts, time
     
 
+def uvmf_search(msfilepath, ra_off=0, dec_off=0, dt=None,
+                reloutdir='uvmf', make_fits=False):
+    """Run uvmodelfit search on a single-scan ms."""
+
+    msfilepath = msfilepath.strip('/')
+    
+    # check ms has some non-zero baselines (xcorrelation)
+    ms.open(msfilepath)
+    uvw = ms.getdata('UVW')
+    ms.close()
+    if np.max(uvw['uvw'][0]) == 0:
+        logging.info(f'no non-zero baselines, returning')
+        return None
+
+    outdir = f"{os.path.dirname(msfilepath)}/{reloutdir.strip('/')}"
+    if not os.path.exists(outdir):
+        os.mkdir(outdir)
+
+    wdir = outdir
+    if not os.path.exists(wdir):
+        os.mkdir(wdir)
+    if os.path.exists(f'{wdir}/tmp.cl'):
+        os.system(f'rm -rf {wdir}/tmp.cl')
+
+    coords = f'{ra_off:.3f}_{dec_off:.3f}'
+
+    logging.info(f'running uv search for {os.path.basename(msfilepath)}')
+            
+    flux = []
+    time = []
+    scan = []
+
+    out = listobs(msfilepath)
+    
+    for k in out.keys():
+        if 'scan' in k:
+            if dt is None:
+                dt = out[k]['0']['IntegrationTime']
+                
+            t0 = out[k]['0']['BeginTime']
+            t1 = out[k]['0']['EndTime']
+            ts = np.arange(t0, t1, dt/(24*60*60))
+                        
+    cleandir = f'{wdir}/cleans_{coords}'
+    if not os.path.exists(cleandir) and make_fits:
+        os.mkdir(cleandir)
+            
+    for i, t in enumerate(ts[:-1]):
+                
+        t0_ = mjd2date(t)
+        t1_ = mjd2date(ts[i+1])
+        t0_str = t0_.strftime('%H:%M:%S') + t0_.strftime(".%f")[:2]
+        t1_str = t1_.strftime('%H:%M:%S') + t1_.strftime(".%f")[:2]
+        tmid = (t + ts[i+1])/2
+        time.append(tmid)
+        
+        # uvmodelfit, flux is saved in cl as complex
+        uvmodelfit(vis=msfilepath, timerange=f"{t0_str}~{t1_str}",
+                   comptype='P',
+                   sourcepar=[1,ra_off,dec_off], varypar=[True,False,False],
+                   outfile=f'{wdir}/tmp.cl')
+        tb.open(f'{wdir}/tmp.cl')
+        flux.append(np.real(tb.getcol('Flux')[0][0]))
+        tb.close()
+        
+        if make_fits:
+            os.system(f'rm -rf {wdir}/tmpimage*')
+            tclean(vis=f'{msfilepath}',imagename=f'{wdir}/tmpimage',
+                   cell='0.5arcsec',
+                   imsize=[256,256],interactive=False,niter=0,
+                   timerange=f"{t0_str}~{t1_str}")
+            exportfits(imagename=f'{wdir}/tmpimage.image',
+                       fitsimage=f'{cleandir}/{i:04d}.fits')
+
+    tplot = (time-np.min(time))*24*60
+
+    fig, ax = plt.subplots(figsize=(8,4))
+    ax.plot(tplot, flux, '.')
+    ax.set_xlabel('Time / minutes')
+    ax.set_ylabel('Flux / Jy')
+    fig.savefig(f'{outdir}/{coords}_flux_time.png')
+    plt.close(fig)
+    np.save(f'{outdir}/{coords}_timeflux.npy', np.vstack((time,flux)))
+
+    os.system(f'rm -rf {wdir}/tmp.cl')
+    if make_fits:
+        os.system(f'rm -rf {wdir}/tmpimage*')
+
+
 def var_search(msfilepath, outdir=None,
                keep_avg_ms=True, keep_scan_ms=False, keep_scan_npy=True):
 
@@ -143,7 +234,6 @@ def var_search(msfilepath, outdir=None,
     outdir = outdir.strip('/')
     
     msfile = os.path.basename(msfilepath)
-    msloc = os.path.dirname(msfilepath)
     logging.info(f'running search for {msfile}')
 
     if outdir:
@@ -231,7 +321,7 @@ def var_search(msfilepath, outdir=None,
             ms_avg_scan = f'{scan_no_dir}/{scan_str}.ms'
             scan_output =f'{scan_no_dir}/{scan_str}'
 
-            if not os.path.exists(npy_avg_scan):
+            if not os.path.exists(npy_avg_scan) or keep_scan_ms:
             
                 logging.info(f'splitting scan {scan_no} from {ms_avg_scan}')
                     
@@ -247,15 +337,18 @@ def var_search(msfilepath, outdir=None,
                     msmd.open(ms_avg_scan)
                     field_id = msmd.fieldsforscan(int(scan_no))
                     if len(field_id) > 1:
-                        logging.warning(f'{len(field_id)} fields for scan {s}')
+                        logging.warning(f'{len(field_id)} fields for scan {scan_no}')
 
                     field_name = msmd.namesforfields(field_id)
                     if len(field_name) > 1:
-                        logging.warning(f'{len(field_name)} fields for scan {s}')
+                        logging.warning(f'{len(field_name)} fields for scan {scan_no}')
                     field_name = field_name[0]
                     msmd.close()
                 
                 np.save(npy_avg_scan, np.array([u, v, vis, wt, time, field_name], dtype=object))
+
+                # default search at 0,0 offset
+                uvmf_search(ms_avg_scan)
 
             else:
                 logging.info(f'loading visibilites from {npy_avg_scan}')
@@ -280,9 +373,9 @@ def var_search(msfilepath, outdir=None,
             logging.info(f'reweighting value (1dof): {rew}')
             wt *= rew
 
-            # check visiblity weights sensible
+            # check visibility weights sensible
             # multiply by sqrt(2) assuming Re and Im independent
-            fig, ax = plt.subplots(1, 2, figsize=(8,4), sharey=False)
+            fig, ax = plt.subplots(1, 2, figsize=(8, 4), sharey=False)
             _ = ax[0].hist(np.sqrt(2)*vis.real*np.sqrt(wt), bins=100, density=True, label='Real')
             _ = ax[1].hist(np.sqrt(2)*vis.imag*np.sqrt(wt), bins=100, density=True, label='Imag')
             x = np.linspace(-3,3)
@@ -302,7 +395,6 @@ def var_search(msfilepath, outdir=None,
             # times in minutes
             tplot1 = (time-np.min(time))*24*60
             tplot2 = (times-np.min(times))*24*60
-            Dt = np.max(times) - np.min(times)*24*60
             dt = np.median(np.diff(times))*24*60*60 # dt in seconds
 
             v_abs = []
@@ -378,64 +470,6 @@ def var_search(msfilepath, outdir=None,
 
     if not keep_avg_ms and os.path.exists(ms_avg):
         shutil.rmtree(ms_avg)
-
-
-def uv_search(msfile, ra_off=0, dec_off=0, make_fits=False):
-
-    flux = []
-    time = []
-    scan = []
-    dt = 2 # seconds
-
-    out = listobs(msfile)
-    
-    for k in out.keys():
-        if 'scan' in k:
-            t0 = out[k]['0']['BeginTime']
-            t1 = out[k]['0']['EndTime']
-            ts = np.arange(t0, t1, dt/(24*60*60))
-            ts = np.append(ts, t1)
-            
-    wdir = os.path.dirname(msfile)
-    cleandir = f'{wdir}/cleans'
-    if not os.path.exists(cleandir):
-        os.mkdir(cleandir)
-            
-    for i, t in enumerate(ts[:-1]):
-                
-        t0_ = mjd2date(t)
-        t1_ = mjd2date(ts[i+1])
-        t0_str = t0_.strftime('%H:%M:%S') + t0_.strftime(".%f")[:2]
-        t1_str = t1_.strftime('%H:%M:%S') + t1_.strftime(".%f")[:2]
-        tmid = (t + ts[i+1])/2
-        time.append(tmid)
-        
-        uvmodelfit(vis=msfile, timerange=f"{t0_str}~{t1_str}",
-                   comptype='P',
-                   sourcepar=[1,ra_off,dec_off], varypar=[True,False,False],
-                   outfile=f'{wdir}/tmp.cl')
-        tb.open(f'{wdir}/tmp.cl')
-        flux.append(abs(tb.getcol('Flux')[0][0]))
-        tb.close()
-        
-        if make_fits:
-            os.system(f'rm -rf {wdir}/tmpimage*')
-            tclean(vis=f'{msfile}',imagename=f'{wdir}/tmpimage',
-                   cell='0.5arcsec',
-                   imsize=[256,256],interactive=False,niter=0,
-                   timerange=f"{t0_str}~{t1_str}")
-            exportfits(imagename=f'{wdir}/tmpimage.image',
-                       fitsimage=f'{cleandir}/{i:04d}.fits')
-
-    fig, ax = plt.subplots(figsize=(8,4))
-    ax.plot(time, flux, '.')
-    fig.savefig(f'{wdir}/uv_flux_time.png')
-    plt.close(fig)
-    np.save(f'{wdir}/timeflux.npy', np.vstack((time,flux)))
-
-    os.system(f'rm -rf {wdir}/tmp.cl')
-    if make_fits:
-        os.system(f'rm -rf {wdir}/tmpimage*')
 
 
 #msfile = 'uid___A002_Xbd8c60_X181a.ms.split.cal'
