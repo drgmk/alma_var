@@ -180,27 +180,27 @@ def h_filter(vis, wt):
     Parameters
     ----------
     vis : numpy array of complex
-        Model visibilities, 1d (nvis*nptsrc) or 2d (nvis, nptsrc)
+        Model visibilities, 1d [nvis x nptsrc] or 2d [nvis, nptsrc]
     wt : numpy array
         Data weights, 1d (nvis)
     """
 
     #     R_inv = np.identity(len(wt))
     norm = 1/np.sqrt(np.sum(wt))
-    # if vis.shape == wt.shape:
+    if vis.shape == wt.shape:
         #         vis = vis_[:,np.newaxis]
         #         norm = 1 / np.sqrt( np.matmul(vis.conj().T, np.matmul(wt*R_inv, vis)) ).squeeze()
         #         h = norm * np.matmul(wt*R_inv, vis).squeeze()
-        # h = norm * wt * vis
-    # else:
+        h = norm * wt * vis
+    else:
         #         norm = 1 / np.sqrt(np.einsum('ij,ij->j', vis_.conj(), np.matmul(wt*R_inv, vis_)) )
         #         h = norm * np.matmul(wt*R_inv, vis_)
-    h = norm * wt[:, np.newaxis] * vis
+        h = norm * wt[:, np.newaxis] * vis
 
     return h, norm
 
 
-def uv_shift(u, v, ra, dec, flatxy=True):
+def uv_shift(u, v, ra, dec, flatxy=False):
     """Return visibilities of a point source at some ra/dec offset.
 
     Most of the time is in the exponential, and
@@ -213,7 +213,8 @@ def uv_shift(u, v, ra, dec, flatxy=True):
     ra,dec : numpy array
         Offsets of points from phase center (1 or 2d)
     flatxy : bool, optional
-        Return visibilities as flattened array.
+        Return visibilities as flattened array [nuv x npt],
+        rather than 2d [nuv, npt].
     """
     out = np.outer(u, -ra) + np.outer(v, dec)
     arg = -2*np.pi*1j*out
@@ -352,7 +353,7 @@ def smooth_plot(times, v_in, det_snr, show_sig=True,
     tplot2 = (times-np.min(times))*24*60
     dt = np.median(np.diff(times))*24*60*60  # dt in seconds
     nw = 60
-    if len(times) < nw/2:
+    if len(times)/2 < nw:
         nw = len(times)//2
     ws = np.arange(nw)+1
     T = np.zeros((nw, len(times)))
@@ -475,6 +476,11 @@ def summed_search(savefile, det_snr, reloutdir='.', outpre='',
 def matchedfilter_search(savefile, det_snr, ra_off=None, dec_off=None,
                          reloutdir='matchf', outpre=''):
     """Run matched filter search on saved set of visibilities.
+
+    Search runs over multiple sources at each time step.
+    vis_mod is the model and h is the matched filter, at each
+    time both have shape [nvis, npt]. The resulting array v_pos
+    has shape [ntime, npt].
 
     Parameters
     ----------
@@ -631,7 +637,7 @@ def uvmodelfit_search(msfilepath, ra_off=None, dec_off=None, dt=None,
 class AlmaVar:
 
     def __init__(self, ms_in, outdir=None, det_snr=4,
-                 pb_factor=1.6, auto_load=True):
+                 pb_factor=1.6, auto_load=False):
         """Initialise by creating output folder and averaging ms.
 
         Parameters
@@ -681,7 +687,6 @@ class AlmaVar:
         self.pb_factor = pb_factor
         self.det_snr = det_snr
         self.field_gaia = {}
-        self.scan_gaia = None
         self.scan_info = None
         self.scan_vis = None
 
