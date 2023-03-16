@@ -2,12 +2,13 @@ import os
 import shutil
 import datetime
 import logging
-import json
+import aplpy
 import numpy as np
 import scipy.stats
 import matplotlib.pyplot as plt
 
 import astropy.units as un
+import astropy.io
 import astropy.time
 from astropy.table import QTable
 from astroquery.gaia import Gaia
@@ -18,7 +19,7 @@ import numexpr
 import casatools.ms
 import casatools.msmetadata
 import casatools.table
-from casatasks import listobs, uvmodelfit, tclean, split, casalog, exportfits
+from casatasks import listobs, uvmodelfit, tclean, split, exportfits
 
 ms = casatools.ms()
 msmd = casatools.msmetadata()
@@ -186,15 +187,15 @@ def h_filter(vis, wt):
 
     #     R_inv = np.identity(len(wt))
     norm = 1/np.sqrt(np.sum(wt))
-    if vis.shape == wt.shape:
+    # if vis.shape == wt.shape:
         #         vis = vis_[:,np.newaxis]
         #         norm = 1 / np.sqrt( np.matmul(vis.conj().T, np.matmul(wt*R_inv, vis)) ).squeeze()
         #         h = norm * np.matmul(wt*R_inv, vis).squeeze()
-        h = norm * wt * vis
-    else:
+        # h = norm * wt * vis
+    # else:
         #         norm = 1 / np.sqrt(np.einsum('ij,ij->j', vis_.conj(), np.matmul(wt*R_inv, vis_)) )
         #         h = norm * np.matmul(wt*R_inv, vis_)
-        h = norm * wt[:, np.newaxis] * vis
+    h = norm * wt[:, np.newaxis] * vis
 
     return h, norm
 
@@ -228,6 +229,35 @@ def mjd2date(d):
     t0 = datetime.datetime(1, 1, 1, 12)
     dt = datetime.timedelta(2400000.5 + d - 1721426.0)
     return t0 + dt
+
+
+def plot_fits_sources(fits, ra, dec):
+    """Plot sources on a FITS image.
+
+    Multiple hacks needed...
+    """
+
+    # fix for UTC in fits file, but astropy wants utc
+    h = astropy.io.fits.open(fits)
+    # hack for UTC in file but astropy wants utc
+    h[0].header['TIMESYS'] = h[0].header['TIMESYS'].lower()
+
+    fig = aplpy.FITSFigure(h[0])
+    fig.show_colorscale(stretch='linear', cmap='viridis')
+    s = SkyCoord(ra, dec)
+    fig.show_markers(s.ra, s.dec, marker='o', edgecolor='white')
+    # hack for add beam to work
+    b = aplpy.Beam(fig)
+    b._wcs = b._wcs[0]
+    b._wcs.is_celestial = True
+    b._wcs.pixel_scale_matrix = fig._wcs.pixel_scale_matrix
+    b.show(major=h[0].header['BMAJ'],
+           minor=h[0].header['BMIN'],
+           angle=h[0].header['BPA'],
+           facecolor='white', edgecolor='black')
+    b.set_hatch('/')
+    fig.set_title(fits.replace('.fits', ''))
+    fig.savefig(fits.replace('.fits', '.png'))
 
 
 def get_ms_info(msfilepath):
@@ -267,7 +297,7 @@ def get_ms_info(msfilepath):
     if len(field_id) > 1:
         logging.warning(f'{len(field_id)} fields for spws {spws}')
     field_id = field_id[0]
-    field_name = msmd.namesforfields(field_id)
+    field_name = msmd.namesforfields(field_id)[0]
 
     out = msmd.phasecenter(fieldid=field_id)
     ra = out['m0']['value'] * un.Unit(out['m0']['unit'])
@@ -300,25 +330,25 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
 
     # proper motion correction
     date_ = astropy.time.Time(date)
-    ra_ep = r['ra'] + (date_.byear-2016.0)*un.year * r['pmra'] / np.cos(r['dec'])
-    dec_ep = r['dec'] + (date_.byear-2016.0)*un.year * r['pmdec']
+    r['ra_ep'] = r['ra'] + (date_.byear-2016.0)*un.year * r['pmra'] / np.cos(r['dec'])
+    r['dec_ep'] = r['dec'] + (date_.byear-2016.0)*un.year * r['pmdec']
     nopm = r['pmra'].mask == True
-    ra_ep[nopm] = r['ra'][nopm]
-    dec_ep[nopm] = r['dec'][nopm]
+    r['ra_ep'][nopm] = r['ra'][nopm]
+    r['dec_ep'][nopm] = r['dec'][nopm]
 
     # convert to offsets
-    ra_off = np.array((ra_ep - ra).to(un.rad).value)
-    dec_off = np.array((dec_ep - dec).to(un.rad).value)
+    ra_off = np.array((r['ra_ep']- ra).to(un.rad).value)
+    dec_off = np.array((r['dec_ep'] - dec).to(un.rad).value)
     ra_off = (ra_off + np.pi) % (2 * np.pi) - np.pi
     dec_off = (dec_off + np.pi) % (2 * np.pi) - np.pi
 
     return ra_off, dec_off, r
 
 
-def smooth_plot(times, v_in, threshold=3, show_sig=False,
+def smooth_plot(times, v_in, det_snr, show_sig=True,
                 ylab='$|Sum(V.w)|$',
                 outdir='.', outpre='', outfile=f'vis_time_smooth.png'):
-    """Diagnostic plot for time series."""
+    """Diagnostic plot for time series, return True for detection."""
     tplot2 = (times-np.min(times))*24*60
     dt = np.median(np.diff(times))*24*60*60  # dt in seconds
     nw = 60
@@ -328,6 +358,7 @@ def smooth_plot(times, v_in, threshold=3, show_sig=False,
     T = np.zeros((nw, len(times)))
     wpk = []
     pk = []
+    snr = []
 
     vmin = 1e5
     for i, wi in enumerate(ws):
@@ -338,35 +369,58 @@ def smooth_plot(times, v_in, threshold=3, show_sig=False,
         # find significant +ve outliers
         clipped, _, _ = scipy.stats.sigmaclip(conv)
         mn, std = np.mean(clipped), np.std(clipped)
-        ok = np.where(T[i] > mn + threshold*std)[0]
+        ok = np.where(T[i] > mn + det_snr*std)[0]
         for o in ok:
             wpk.append(wi)
             pk.append(tplot2[o])
+            snr.append((T[i, o]-mn)/std)
 
         if np.min(conv) < vmin:
             vmin = np.min(conv)
 
     wpk = np.array(wpk)
     pk = np.array(pk)
+    snr = np.array(snr)
 
     fig, ax = plt.subplots(2, figsize=(8, 6), sharex=True,
                            gridspec_kw={'height_ratios': [2, 1]})
     ax[0].imshow(T, aspect='auto', origin='lower', vmin=vmin,
                  extent=(np.min(tplot2), np.max(tplot2),
                          np.min(ws)-0.5, np.max(ws)+0.5))
-    if show_sig:
-        ax[0].plot(pk, wpk, '+w')
+    if show_sig and len(snr) > 0:
+        mx = np.argmax(snr)
+        ax[0].plot(pk[mx], wpk[mx], '+k')
     ax[1].plot(tplot2, v_in, '.', label='$|Sum(V.w)|$')
     ax[1].set_xlabel('Time / minutes')
     ax[1].set_ylabel(ylab)
     ax[0].set_ylabel(f'smoothing width / $\Delta t$={dt:3.2f} seconds')
     fig.tight_layout()
-    fig.savefig(f'{outdir}/{outpre}{outfile}')
+    figname = f'{outdir}/{outpre}{outfile}'
+    fig.savefig(figname)
     plt.close(fig)
 
+    return len(wpk) > 0, figname
 
-def summed_search(savefile, reloutdir='.', plot_vis_hist=False, plot_raw_vis=False):
-    """Point source position-free search."""
+
+def summed_search(savefile, det_snr, reloutdir='.', outpre='',
+                  plot_vis_hist=False, plot_raw_vis=False):
+    """Point source position-free search.
+
+    Parameters
+    ----------
+    savefile : str
+        Name of numpy savefile with visibilities.
+    det_snr : float
+        SNR threshold for detection flagging.
+    reloutdir : str
+        Relative location from savefile in which to put output plots.
+    outpre : str, optional
+        String to prepend to filename.
+    plot_vis_hist : bool, optional
+        Plot histogram of visibilities as sanity check.
+    plot_raw_vis : bool, optional
+        Plot raw visibilities as sanity check.
+    """
 
     logging.info(f'summed search: loading from {savefile}')
     u, v, vis, wt, time = load_npy_vis(savefile)
@@ -393,7 +447,7 @@ def summed_search(savefile, reloutdir='.', plot_vis_hist=False, plot_raw_vis=Fal
             a.set_xlabel('snr per visibility')
             a.legend()
         ax[0].set_ylabel('density')
-        fig.savefig(f'{reloutdir}/vis_snr.png')
+        fig.savefig(f'{reloutdir}/{outpre}_vis_snr.png')
         plt.close(fig)
 
     # look at raw and summed data
@@ -406,7 +460,7 @@ def summed_search(savefile, reloutdir='.', plot_vis_hist=False, plot_raw_vis=Fal
         ax[0].set_ylabel('Real')
         ax[1].set_ylabel('Imag')
         fig.tight_layout()
-        fig.savefig(f'{reloutdir}/rawvis_time.png')
+        fig.savefig(f'{reloutdir}/{outpre}_rawvis_time.png')
         plt.close(fig)
 
     # smooth light curve and plot
@@ -414,20 +468,26 @@ def summed_search(savefile, reloutdir='.', plot_vis_hist=False, plot_raw_vis=Fal
     if not os.path.exists(outpath):
         os.mkdir(outpath)
 
-    smooth_plot(times, v_abs, outdir=f'{outpath}')
+    return smooth_plot(times, v_abs, det_snr,
+                       outdir=f'{outpath}', outfile=f'{outpre}_sum.png')
 
 
-def matchedfilter_search(savefile, ra_off=None, dec_off=None, reloutdir='matchf'):
+def matchedfilter_search(savefile, det_snr, ra_off=None, dec_off=None,
+                         reloutdir='matchf', outpre=''):
     """Run matched filter search on saved set of visibilities.
 
     Parameters
     ----------
     savefile : str
         Name of numpy savefile with visibilities.
+    det_snr : float
+        SNR threshold for detection flagging.
     ra_off, dec_off : numpy array, list, tuple
         Coordinates for search in radians
     reloutdir : str
         Relative location from savefile in which to put output plots.
+    outpre : str, optional
+        String to prepend to filename.
     """
 
     logging.info(f'matched filter: loading from {savefile}')
@@ -457,9 +517,16 @@ def matchedfilter_search(savefile, ra_off=None, dec_off=None, reloutdir='matchf'
     outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
     if not os.path.exists(outpath):
         os.mkdir(outpath)
+    dets = []
+    fns = []
     for i in range(len(ra)):
-        smooth_plot(times, v_pos[:, i], outdir=outpath, ylab='SNR',
-                    outpre=f'{i:03d}_{np.rad2deg(ra[i])*3600:.3f}_{np.rad2deg(dec[i])*3600:.3f}.')
+        det, fn = smooth_plot(times, v_pos[:, i], det_snr,
+                              outdir=outpath, outfile='.png', ylab='SNR',
+                              outpre=f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}_{np.rad2deg(dec[i])*3600:.3f}.')
+        dets.append(det)
+        fns.append(fn)
+
+    return dets, fns
 
 
 def uvmodelfit_search(msfilepath, ra_off=None, dec_off=None, dt=None,
@@ -563,8 +630,25 @@ def uvmodelfit_search(msfilepath, ra_off=None, dec_off=None, dt=None,
 
 class AlmaVar:
 
-    def __init__(self, ms_in, outdir=None, pb_factor=3.5):
-        """Initialise by creating output folder and averaging ms."""
+    def __init__(self, ms_in, outdir=None, det_snr=4,
+                 pb_factor=1.6, auto_load=True):
+        """Initialise by creating output folder and averaging ms.
+
+        Parameters
+        ----------
+        ms_in : str
+            Path of ms file to process.
+        outdir : str, optional
+            Folder in which to put output (subfolder will be created here).
+        det_snr : float, optional
+            SNR threshold for flagging a detection.
+        auto_load : bool, optional
+            Automatically load what has been processed already.
+            May cause problems if settings have changed.
+        pb_factor : float, optional
+            Number of primary beam FWHM for target search/clean images.
+            1.6 gives images out to tclean default of pblimit=0.2.
+        """
         # set up some output folders
         self.ms_in = ms_in.rstrip('/')
         self.ms_in_name = os.path.basename(self.ms_in)
@@ -595,19 +679,25 @@ class AlmaVar:
 
         # some things (that might get filled later)
         self.pb_factor = pb_factor
+        self.det_snr = det_snr
         self.field_gaia = {}
         self.scan_gaia = None
         self.scan_info = None
         self.scan_vis = None
+
+        # auto load
+        if auto_load:
+            if os.path.exists(self.ms_avg):
+                self.avg_ms_in()
 
     def process(self):
         """Shortcut."""
         self.avg_ms_in()
         self.split_scans(keep_scan_ms=True)
         self.clean_images()
-        self.split_scans(keep_scan_ms=False)
+        self.split_scans(keep_scan_ms=False)  # delete ms files
         self.summed_filter()
-        self.gaia_matched_filter(min_plx_mas=10)
+        self.gaia_matched_filter(min_plx_mas=1)
 
     def avg_ms_in(self, nchan_spw=1, spw_include=None):
         """Average ms_in down to fewer channels per spw."""
@@ -753,9 +843,8 @@ class AlmaVar:
                 continue
 
             # get a sensible looking image. pblimit is by default 0.2, but fwhm is 0.5,
-            # and 3.5*fwhm is empirically where the image cuts off
             pix_sz = self.scan_info[scan]['spatial_res'].to(un.arcsec).value / 2 / oversample
-            img_fov = self.scan_info[scan]['pb_hwhm'].to(un.arcsec).value * 3.5
+            img_fov = self.scan_info[scan]['pb_hwhm'].to(un.arcsec).value * 2 * self.pb_factor
             img_sz = int(img_fov / pix_sz)
             if img_sz < min_size:
                 img_sz = min_size
@@ -780,6 +869,20 @@ class AlmaVar:
                        fitsimage=outfits)
             os.system(f'rm -rf {self.wdir}/tmpimage*')
 
+    def link_to_field(self, file, scan):
+        """Symlink a file in a field directory."""
+        fn = self.scan_info[scan]['field_name']
+
+        fdir = f'{self.wdir}/{fn}'
+        if not os.path.exists(fdir):
+            os.mkdir(fdir)
+
+        link = f'{fdir}/{scan:03d}_{os.path.basename(file)}'
+        link_rel = os.path.relpath(os.path.dirname(file), fdir)
+        linked = f'{link_rel}/{os.path.basename(file)}'
+        if not os.path.exists(link):
+            os.symlink(linked, link)
+
     def summed_filter(self, scans=None):
         """Summed search for specified scans."""
         if scans is None:
@@ -787,7 +890,11 @@ class AlmaVar:
 
         for scan in scans:
             if self.scan_info[scan]['nvis'] > 0:
-                summed_search(self.scan_info[scan]['scan_avg_vis'])
+                det, fn = summed_search(self.scan_info[scan]['scan_avg_vis'],
+                                        self.det_snr,
+                                        outpre=self.scan_info[scan]['scan_str'])
+                if det:
+                    self.link_to_field(fn, scan)
 
     def matched_filter(self, scans=None, ra_off=None, dec_off=None):
         """Matched filter search for specified scans."""
@@ -800,12 +907,16 @@ class AlmaVar:
 
         for scan in scans:
             if self.scan_info[scan]['nvis'] > 0:
-                matchedfilter_search(self.scan_info[scan]['scan_avg_vis'],
-                                 ra_off=ra_off, dec_off=dec_off)
+                dets, fns = matchedfilter_search(self.scan_info[scan]['scan_avg_vis'],
+                                                 self.det_snr,
+                                                 outpre=self.scan_info[scan]['scan_str'],
+                                                 ra_off=ra_off, dec_off=dec_off)
+                for det, fn in zip(dets, fns):
+                    if det:
+                        self.link_to_field(fn, scan)
 
-    def gaia_sources(self, scans=None, min_plx_mas=None):
+    def gaia_sources(self, scans=None, min_plx_mas=None, update=False):
         """Find and save Gaia DR3 sources in FOV for specified scans.
-
 
         Sources are specified per field, which might be observed
         multiple times, so more efficient to save per field.
@@ -815,16 +926,22 @@ class AlmaVar:
 
         for scan in scans:
             field = self.scan_info[scan]['field_id']
-            if field not in self.field_gaia.keys():
+            if field not in self.field_gaia.keys() or update:
                 ra_off, dec_off, r = get_gaia_offsets(self.scan_info[scan]['phase_center'][0],
                                                       self.scan_info[scan]['phase_center'][1],
-                                                      self.scan_info[scan]['pb_hwhm']*self.pb_factor,
+                                                      self.scan_info[scan]['pb_hwhm'] * self.pb_factor,
                                                       self.scan_info[scan]['mean_time'],
                                                       min_plx_mas=min_plx_mas)
                 self.field_gaia[field] = {}
                 self.field_gaia[field]['ra_off'] = ra_off
                 self.field_gaia[field]['dec_off'] = dec_off
                 self.field_gaia[field]['table'] = r
+
+                # plot with sources
+                fits = (f"{self.scan_info[scan]['scan_dir']}/"
+                        f"{self.scan_info[scan]['scan_str']}.fits")
+                if os.path.exists(fits):
+                    plot_fits_sources(fits, r['ra_ep'], r['dec_ep'])
 
     def gaia_matched_filter(self, scans=None, min_plx_mas=None):
         """Run matched filter for Gaia sources in FOV."""
@@ -835,7 +952,7 @@ class AlmaVar:
             if self.scan_info[scan]['nvis'] > 0:
                 field = self.scan_info[scan]['field_id']
 
-                if not field in self.field_gaia.keys():
+                if field not in self.field_gaia.keys():
                     self.gaia_sources(scans=scans, min_plx_mas=min_plx_mas)
 
                 if len(self.field_gaia[field]['ra_off']) == 0:
