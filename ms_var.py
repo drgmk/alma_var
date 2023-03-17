@@ -6,6 +6,7 @@ import aplpy
 import numpy as np
 import scipy.stats
 import matplotlib.pyplot as plt
+import numexpr
 
 import astropy.units as un
 import astropy.io
@@ -15,12 +16,13 @@ from astroquery.gaia import Gaia
 from astropy.coordinates import SkyCoord
 
 # package load for modular CASA
-import numexpr
+import casatools.logsink
 import casatools.ms
 import casatools.msmetadata
 import casatools.table
 from casatasks import listobs, uvmodelfit, tclean, split, exportfits
 
+logger = casatools.logsink()
 ms = casatools.ms()
 msmd = casatools.msmetadata()
 tb = casatools.table()
@@ -245,8 +247,9 @@ def plot_fits_sources(fits, ra, dec):
 
     fig = aplpy.FITSFigure(h[0])
     fig.show_colorscale(stretch='linear', cmap='viridis')
-    s = SkyCoord(ra, dec)
-    fig.show_markers(s.ra, s.dec, marker='o', edgecolor='white')
+    if len(ra) > 0:
+        s = SkyCoord(ra, dec)
+        fig.show_markers(s.ra, s.dec, marker='o', edgecolor='white')
     # hack for add beam to work
     b = aplpy.Beam(fig)
     b._wcs = b._wcs[0]
@@ -669,6 +672,8 @@ class AlmaVar:
             logging.info(f'creating output folder {self.wdir}')
             os.mkdir(self.wdir)
 
+        logger.setlogfile(f'{self.wdir}/casalog.log')
+
         if not os.path.exists(self.scandir):
             os.mkdir(self.scandir)
 
@@ -680,7 +685,7 @@ class AlmaVar:
         tb.open(self.ms_in)
         # check for datacolumn
         self.ms_in_datacol = 'CORRECTED'
-        if 'CORRECTED' not in tb.colnames():
+        if 'CORRECTED_DATA' not in tb.colnames():
             self.ms_in_datacol = 'DATA'
 
         # some things (that might get filled later)
@@ -706,6 +711,8 @@ class AlmaVar:
 
     def avg_ms_in(self, nchan_spw=1, spw_include=None):
         """Average ms_in down to fewer channels per spw."""
+
+        print(f'averaging input ms')
 
         # details, so we can exclude most data
         # TDM/FDM corresponds to FULL_RES (not SQLD or CH_AVG)
@@ -942,11 +949,11 @@ class AlmaVar:
                 self.field_gaia[field]['dec_off'] = dec_off
                 self.field_gaia[field]['table'] = r
 
-                # plot with sources
-                fits = (f"{self.scan_info[scan]['scan_dir']}/"
-                        f"{self.scan_info[scan]['scan_str']}.fits")
-                if os.path.exists(fits):
-                    plot_fits_sources(fits, r['ra_ep'], r['dec_ep'])
+            # plot with sources
+            fits = (f"{self.scan_info[scan]['scan_dir']}/"
+                    f"{self.scan_info[scan]['scan_str']}.fits")
+            if os.path.exists(fits):
+                plot_fits_sources(fits, r['ra_ep'], r['dec_ep'])
 
     def gaia_matched_filter(self, scans=None, min_plx_mas=None):
         """Run matched filter for Gaia sources in FOV."""
