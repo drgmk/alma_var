@@ -650,16 +650,19 @@ def uvmodelfit_search(msfilepath, ra_off=None, dec_off=None, dt=None,
 
 class AlmaVar:
 
-    def __init__(self, ms_in, outdir=None, det_snr=4,
-                 pb_factor=1.6, auto_load=False):
+    def __init__(self, ms_in=None, ms_avg=None, outdir=None,
+                 det_snr=4, pb_factor=1.6, auto_load=False):
         """Initialise by creating output folder and averaging ms.
 
         Parameters
         ----------
         ms_in : str
-            Path of ms file to process.
+            Path of ms file to process. Not needed if ms_avg given.
+        ms_avg : str
+            Path of already averaged ms file if exists.
         outdir : str, optional
             Folder in which to put output (subfolder will be created here).
+             Not needed if ms_avg given.
         det_snr : float, optional
             SNR threshold for flagging a detection.
         auto_load : bool, optional
@@ -670,14 +673,24 @@ class AlmaVar:
             1.6 gives images out to tclean default of pblimit=0.2.
         """
         # set up some output folders
-        self.ms_in = ms_in.rstrip('/')
-        self.ms_in_name = os.path.basename(self.ms_in)
-        if outdir is None:
-            outdir = os.path.dirname(ms_in)
-        outdir = outdir.rstrip('/')
-        self.wdir = f'{outdir}/{self.ms_in_name}.var'
+        if outdir:
+            outdir = outdir.rstrip('/')
+        if ms_in:
+            self.ms_in = ms_in.rstrip('/')
+            self.ms_in_name = os.path.basename(self.ms_in)
+            if outdir is None:
+                outdir = os.path.dirname(ms_in)
+            self.wdir = f'{outdir}/{self.ms_in_name}.var'
+            self.ms_avg = f'{self.wdir}/{self.ms_in_name}.avg'
+        else:
+            if '.avg' not in ms_avg:
+                logging.warning(f'ms_avg should end in ".avg"')
+            ms_avg = ms_avg.rstrip('/')
+            self.ms_in = None
+            self.ms_avg = ms_avg
+            self.wdir = os.path.dirname(f'{ms_avg}/../')
+
         self.scandir = f'{self.wdir}/scans'
-        self.ms_avg = f'{self.wdir}/{self.ms_in_name}.avg'
 
         if not os.path.exists(self.wdir):
             logging.info(f'creating output folder {self.wdir}')
