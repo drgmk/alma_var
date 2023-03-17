@@ -2,33 +2,41 @@ import os
 import shutil
 import datetime
 import logging
-import aplpy
 import numpy as np
 import scipy.stats
 import matplotlib.pyplot as plt
-import numexpr
 
-import astropy.units as un
-import astropy.io
-import astropy.time
-from astropy.table import QTable
-from astroquery.gaia import Gaia
-from astropy.coordinates import SkyCoord
+# test what we are using and import appropriately
+try:
+    __casashell_state__
+    print('Assuming packaged CASA')
+    logging.warning('many things will not work')
+    NUMEXPR = False
+except NameError:
+    print('Assuming modular CASA')
+    import numexpr
+    NUMEXPR = True
+    import aplpy
+    import astropy.units as un
+    import astropy.io
+    import astropy.time
+    from astropy.table import QTable
+    from astroquery.gaia import Gaia
+    from astropy.coordinates import SkyCoord
 
-# package load for modular CASA
-import casatools.logsink
-import casatools.ms
-import casatools.msmetadata
-import casatools.table
-from casatasks import listobs, uvmodelfit, tclean, split, exportfits
+    import casatools.logsink
+    import casatools.ms
+    import casatools.msmetadata
+    import casatools.table
+    from casatasks import listobs, uvmodelfit, tclean, split, exportfits
 
-logger = casatools.logsink()
-ms = casatools.ms()
-msmd = casatools.msmetadata()
-tb = casatools.table()
+    casalog = casatools.logsink()
+    ms = casatools.ms()
+    msmd = casatools.msmetadata()
+    tb = casatools.table()
 
-Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
-Gaia.ROW_LIMIT = -1
+    Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
+    Gaia.ROW_LIMIT = -1
 
 logging.basicConfig(level=logging.INFO)
 
@@ -220,8 +228,11 @@ def uv_shift(u, v, ra, dec, flatxy=False):
     """
     out = np.outer(u, -ra) + np.outer(v, dec)
     arg = -2*np.pi*1j*out
-    a = numexpr.evaluate('exp(arg)')
-    # a = np.exp(arg)
+    if NUMEXPR:
+        a = numexpr.evaluate('exp(arg)')
+    else:
+        a = np.exp(arg)
+
     if flatxy:
         return a.reshape((-1,))
     else:
@@ -672,21 +683,24 @@ class AlmaVar:
             logging.info(f'creating output folder {self.wdir}')
             os.mkdir(self.wdir)
 
-        logger.setlogfile(f'{self.wdir}/casalog.log')
+        casalog.setlogfile(f'{self.wdir}/casalog.log')
 
         if not os.path.exists(self.scandir):
             os.mkdir(self.scandir)
 
-        # info from ms_in we can grab now
-        ms.open(self.ms_in)
-        self.ms_in_spw_info = ms.getspectralwindowinfo()
-        ms.close()
+        # only need info from ms_in if we are going to average it
+        if not os.path.exists(self.ms_avg):
+            ms.open(self.ms_in)
+            self.ms_in_spw_info = ms.getspectralwindowinfo()
+            ms.close()
 
-        tb.open(self.ms_in)
-        # check for datacolumn
-        self.ms_in_datacol = 'CORRECTED'
-        if 'CORRECTED_DATA' not in tb.colnames():
-            self.ms_in_datacol = 'DATA'
+            # check for datacolumn
+            tb.open(self.ms_in)
+            self.ms_in_datacol = 'CORRECTED'
+            if 'CORRECTED_DATA' not in tb.colnames():
+                self.ms_in_datacol = 'DATA'
+        else:
+            self.avg_ms_in()
 
         # some things (that might get filled later)
         self.pb_factor = pb_factor
@@ -695,10 +709,9 @@ class AlmaVar:
         self.scan_info = None
         self.scan_vis = None
 
-        # auto load
+        # auto load will go here
         if auto_load:
-            if os.path.exists(self.ms_avg):
-                self.avg_ms_in()
+            pass
 
     def process(self):
         """Shortcut."""
@@ -712,41 +725,44 @@ class AlmaVar:
     def avg_ms_in(self, nchan_spw=1, spw_include=None):
         """Average ms_in down to fewer channels per spw."""
 
-        print(f'averaging input ms')
-
-        # details, so we can exclude most data
-        # TDM/FDM corresponds to FULL_RES (not SQLD or CH_AVG)
-        # but we allow for various choices anyway
         if spw_include is None:
             spw_include = {'tfdm': True,
                            'sqld': False, 'chavg': False}
-        msmd.open(self.ms_in)
-        spws = {}
-        if spw_include['tfdm']:
-            spws['tfdm'] = msmd.almaspws(tdm=True, fdm=True)
-        if spw_include['sqld']:
-            spws['sqld'] = msmd.almaspws(sqld=True)
-        if spw_include['chavg']:
-            spws['chavg'] = msmd.almaspws(chavg=True)
-        logging.info(f'spws: {spws}')
-        msmd.close()
 
-        # average FULL_RES down to fewer channels per spw
-        # output is in DATA column
-        spw_list = []
-        avg_list = []
-        for k in self.ms_in_spw_info.keys():
-            spwid = self.ms_in_spw_info[k]['SpectralWindowId']
-            if spwid in spws['tfdm']:
-                spw_list.append(spwid)
-                avg_list.append(self.ms_in_spw_info[k]['NumChan']//nchan_spw)
-
+        # skips ms_in related stuff if ms_avg exists already
         if not os.path.exists(self.ms_avg):
-            logging.info(f'averaging {self.ms_in}, using {self.ms_in_datacol}')
+            logging.info('averaging input ms')
+
+            # details, so we can exclude most data
+            # TDM/FDM corresponds to FULL_RES (not SQLD or CH_AVG)
+            # but we allow for various choices anyway
+            msmd.open(self.ms_in)
+            spws = {}
+            if spw_include['tfdm']:
+                spws['tfdm'] = msmd.almaspws(tdm=True, fdm=True)
+            if spw_include['sqld']:
+                spws['sqld'] = msmd.almaspws(sqld=True)
+            if spw_include['chavg']:
+                spws['chavg'] = msmd.almaspws(chavg=True)
+            logging.info(f'spws: {spws}')
+            msmd.close()
+
+            # average FULL_RES down to fewer channels per spw
+            # output is in DATA column
+            spw_list = []
+            avg_list = []
+            for k in self.ms_in_spw_info.keys():
+                spwid = self.ms_in_spw_info[k]['SpectralWindowId']
+                if spwid in spws['tfdm']:
+                    spw_list.append(spwid)
+                    avg_list.append(self.ms_in_spw_info[k]['NumChan']//nchan_spw)
+
             logging.info(f'keeping spws:{spw_list}, widths:{avg_list}')
             split(vis=self.ms_in, outputvis=self.ms_avg, keepflags=False,
                   spw=','.join([str(s) for s in spw_list]), width=avg_list,
                   datacolumn=self.ms_in_datacol)
+        else:
+            logging.info('loading averaged ms')
 
         # now fill some info for averaged ms
         ms.open(self.ms_avg)
