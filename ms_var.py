@@ -38,13 +38,15 @@ except NameError:
     Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
     Gaia.ROW_LIMIT = -1
 
-logging.basicConfig(level=logging.INFO)
+    # suppress WCS and other info/warnings
+    logging.getLogger('astroquery').setLevel(logging.ERROR)
+    logging.getLogger('astropy').setLevel(logging.WARNING)
 
 
 def export_ms(msfilename, xcor=True, acor=False):
-    """Return visibilities etc.
-
-    Direct copy of Luca Matra's export."""
+    """Direct copy of Luca Matra's export.
+    https://github.com/dlmatra/miao
+    """
 
     cc = 2.9979e10  # cm/s
 
@@ -103,24 +105,30 @@ def export_ms(msfilename, xcor=True, acor=False):
             uu[i, j] = uvw[0, j]*freqs[i, spwid[j]]/(cc/100.0)
             vv[i, j] = uvw[1, j]*freqs[i, spwid[j]]/(cc/100.0)
 
-    # Extract real and imaginary part of the visibilities at all u-v
-    # coordinates, for both polarization states (XX and YY), extract
-    # weights which correspond to 1/(uncertainty)^2
-    Re_xx = data[0, :, :].real
-    Re_yy = data[1, :, :].real
-    Im_xx = data[0, :, :].imag
-    Im_yy = data[1, :, :].imag
-    weight_xx = weight[0, :]
-    weight_yy = weight[1, :]
+    # Extract real and imaginary part of the visibilities at all u-v coordinates,
+    # for both polarization states (XX and YY), extract weights which correspond
+    # to 1/(uncertainty)^2
+    Re_xx = data[0,:,:].real
+    Im_xx = data[0,:,:].imag
+    weight_xx = weight[0,:]
+    if npol>=2:
+        Re_yy = data[1,:,:].real
+        Im_yy = data[1,:,:].imag
+        weight_yy = weight[1,:]
 
-    # Since we don't care about polarization, combine polarization states
-    # (average them together) and fix the weights accordingly. Also if
-    # any of the two polarization states is flagged, flag the outcome of
-    # the combination.
-    flags = flags[0, :, :]*flags[1, :, :]
-    Re = np.where((weight_xx + weight_yy) != 0, (Re_xx*weight_xx + Re_yy*weight_yy) / (weight_xx + weight_yy), 0.)
-    Im = np.where((weight_xx + weight_yy) != 0, (Im_xx*weight_xx + Im_yy*weight_yy) / (weight_xx + weight_yy), 0.)
-    wgts = (weight_xx + weight_yy)
+        # Since we don't care about polarization, combine polarization states
+        # (average them together) and fix the weights accordingly. Also if any
+        # of the two polarization states is flagged, flag the outcome of the
+        # combination.
+        flags = np.logical_or(flags[0,:,:],flags[1,:,:])
+        Re = np.where((weight_xx + weight_yy) != 0, (Re_xx*weight_xx + Re_yy*weight_yy) / (weight_xx + weight_yy), 0.)
+        Im = np.where((weight_xx + weight_yy) != 0, (Im_xx*weight_xx + Im_yy*weight_yy) / (weight_xx + weight_yy), 0.)
+        wgts = (weight_xx + weight_yy)
+    else:
+        Re=Re_xx
+        Im=Im_xx
+        wgts=weight_xx
+        flags=flags[0,:,:]
 
     # Find which of the data represents cross-correlation between two
     # antennas as opposed to auto-correlation of a single antenna.
@@ -128,7 +136,6 @@ def export_ms(msfilename, xcor=True, acor=False):
     xc = np.where(ant1 != ant2)[0]
     ac = np.where(ant1 == ant2)[0]
     if xcor:
-        xc = xc
         if acor:
             xc = np.logical_or(xc, ac)
     elif acor:
@@ -176,10 +183,12 @@ def export_ms(msfilename, xcor=True, acor=False):
 
     return data_uu, data_vv, vis, data_wgts, time
 
+
 def load_npy_vis(savefile):
     """Load visibilities, restoring reals."""
     u, v, vis, wt, time = np.load(savefile)
     return u.real, v.real, vis, wt.real, time.real
+
 
 def h_filter(vis, wt):
     """Return a matched filter for the model visibilities and data weights given.
@@ -260,7 +269,7 @@ def plot_fits_sources(fits, ra, dec):
     fig.show_colorscale(stretch='linear', cmap='viridis')
     if len(ra) > 0:
         s = SkyCoord(ra, dec)
-        fig.show_markers(s.ra, s.dec, marker='o', edgecolor='white')
+        fig.show_markers(s.ra, s.dec, marker='o', edgecolor='lightgrey')
     # hack for add beam to work
     b = aplpy.Beam(fig)
     b._wcs = b._wcs[0]
@@ -273,6 +282,7 @@ def plot_fits_sources(fits, ra, dec):
     b.set_hatch('/')
     fig.set_title(fits.replace('.fits', ''))
     fig.savefig(fits.replace('.fits', '.png'))
+    fig.close()
 
 
 def get_ms_info(msfilepath):
@@ -313,6 +323,7 @@ def get_ms_info(msfilepath):
         logging.warning(f'{len(field_id)} fields for spws {spws}')
     field_id = field_id[0]
     field_name = msmd.namesforfields(field_id)[0]
+    intent = np.unique(msmd.intentsforfield(field_id))
 
     out = msmd.phasecenter(fieldid=field_id)
     ra = out['m0']['value'] * un.Unit(out['m0']['unit'])
@@ -326,7 +337,8 @@ def get_ms_info(msfilepath):
             'spatial_res': res,
             'mean_time': meantime,
             'field_id': field_id,
-            'field_name': field_name}
+            'field_name': field_name,
+            'intent': intent}
 
     return info
 
@@ -334,7 +346,7 @@ def get_ms_info(msfilepath):
 def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     """Return offsets of Gaia sources from ra/dec in radians."""
     coord = SkyCoord(ra=ra, dec=dec, frame='icrs')
-    print(f'get_gaia_offsets: search at {ra}, {dec}')
+    logging.info(f'get_gaia_offsets: search at {ra}, {dec}')
 
     r = Gaia.query_object_async(coordinate=coord, radius=radius)
     r = QTable(r)
@@ -360,298 +372,11 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     return ra_off, dec_off, r
 
 
-def smooth_plot(times, v_in, det_snr, show_sig=True,
-                ylab='$|Sum(V.w)|$',
-                outdir='.', outpre='', outfile=f'vis_time_smooth.png'):
-    """Diagnostic plot for time series, return True for detection."""
-    tplot2 = (times-np.min(times))*24*60
-    dt = np.median(np.diff(times))*24*60*60  # dt in seconds
-    nw = 60
-    if len(times)/2 < nw:
-        nw = len(times)//2
-    ws = np.arange(nw)+1
-    T = np.zeros((nw, len(times)))
-    wpk = []
-    pk = []
-    snr = []
-
-    vmin = 1e5
-    for i, wi in enumerate(ws):
-        conv = np.convolve(v_in, np.repeat(1, wi)/wi, mode='valid')
-        conv = (conv-np.mean(conv))*np.sqrt(wi) + np.mean(conv)
-        T[i, (wi-1)//2:len(v_in)-wi//2] = conv
-
-        # find significant +ve outliers
-        clipped, _, _ = scipy.stats.sigmaclip(conv)
-        mn, std = np.mean(clipped), np.std(clipped)
-        ok = np.where(T[i] > mn + det_snr*std)[0]
-        for o in ok:
-            wpk.append(wi)
-            pk.append(tplot2[o])
-            snr.append((T[i, o]-mn)/std)
-
-        if np.min(conv) < vmin:
-            vmin = np.min(conv)
-
-    wpk = np.array(wpk)
-    pk = np.array(pk)
-    snr = np.array(snr)
-
-    fig, ax = plt.subplots(2, figsize=(8, 6), sharex=True,
-                           gridspec_kw={'height_ratios': [2, 1]})
-    ax[0].imshow(T, aspect='auto', origin='lower', vmin=vmin,
-                 extent=(np.min(tplot2), np.max(tplot2),
-                         np.min(ws)-0.5, np.max(ws)+0.5))
-    if show_sig and len(snr) > 0:
-        mx = np.argmax(snr)
-        ax[0].plot(pk[mx], wpk[mx], '+k')
-    ax[1].plot(tplot2, v_in, '.', label='$|Sum(V.w)|$')
-    ax[1].set_xlabel('Time / minutes')
-    ax[1].set_ylabel(ylab)
-    ax[0].set_ylabel(f'smoothing width / $\Delta t$={dt:3.2f} seconds')
-    fig.tight_layout()
-    figname = f'{outdir}/{outpre}{outfile}'
-    fig.savefig(figname)
-    plt.close(fig)
-
-    return len(wpk) > 0, figname
-
-
-def summed_search(savefile, det_snr, reloutdir='.', outpre='',
-                  plot_vis_hist=False, plot_raw_vis=False):
-    """Point source position-free search.
-
-    Parameters
-    ----------
-    savefile : str
-        Name of numpy savefile with visibilities.
-    det_snr : float
-        SNR threshold for detection flagging.
-    reloutdir : str
-        Relative location from savefile in which to put output plots.
-    outpre : str, optional
-        String to prepend to filename.
-    plot_vis_hist : bool, optional
-        Plot histogram of visibilities as sanity check.
-    plot_raw_vis : bool, optional
-        Plot raw visibilities as sanity check.
-    """
-
-    logging.info(f'summed search: loading from {savefile}')
-    u, v, vis, wt, time = load_npy_vis(savefile)
-
-    # unique returns sorted times
-    times = np.unique(time)
-
-    v_abs = []
-    for t in times:
-        ok = time == t
-        v_abs.append(np.dot(np.abs(vis[ok]), np.sqrt(wt[ok])))
-
-    v_abs = np.array(v_abs)
-
-    # check visibility weights sensible
-    # multiply by sqrt(2) assuming Re and Im independent
-    if plot_vis_hist:
-        fig, ax = plt.subplots(1, 2, figsize=(8, 4), sharey=False)
-        _ = ax[0].hist(np.sqrt(2)*vis.real*np.sqrt(wt), bins=100, density=True, label='Real')
-        _ = ax[1].hist(np.sqrt(2)*vis.imag*np.sqrt(wt), bins=100, density=True, label='Imag')
-        x = np.linspace(-3, 3)
-        for a in ax:
-            a.plot(x, np.max(_[0])*np.exp(-(x**2)/2))
-            a.set_xlabel('snr per visibility')
-            a.legend()
-        ax[0].set_ylabel('density')
-        fig.savefig(f'{reloutdir}/{outpre}_vis_snr.png')
-        plt.close(fig)
-
-    # look at raw and summed data
-    if plot_raw_vis:
-        tplot1 = (time-np.min(time))*24*60
-        fig, ax = plt.subplots(2, sharex=True, figsize=(8, 4))
-        ax[0].plot(tplot1, vis.real, '.', label='Real', markersize=0.3)
-        ax[1].plot(tplot1, vis.real, '.', label='Imag', markersize=0.3)
-        ax[1].set_xlabel('Time / minutes')
-        ax[0].set_ylabel('Real')
-        ax[1].set_ylabel('Imag')
-        fig.tight_layout()
-        fig.savefig(f'{reloutdir}/{outpre}_rawvis_time.png')
-        plt.close(fig)
-
-    # smooth light curve and plot
-    outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
-    if not os.path.exists(outpath):
-        os.mkdir(outpath)
-
-    return smooth_plot(times, v_abs, det_snr,
-                       outdir=f'{outpath}', outfile=f'{outpre}_sum.png')
-
-
-def matchedfilter_search(savefile, det_snr, ra_off=None, dec_off=None,
-                         reloutdir='matchf', outpre=''):
-    """Run matched filter search on saved set of visibilities.
-
-    Search runs over multiple sources at each time step.
-    vis_mod is the model and h is the matched filter, at each
-    time both have shape [nvis, npt]. The resulting array v_pos
-    has shape [ntime, npt].
-
-    Parameters
-    ----------
-    savefile : str
-        Name of numpy savefile with visibilities.
-    det_snr : float
-        SNR threshold for detection flagging.
-    ra_off, dec_off : numpy array, list, tuple
-        Coordinates for search in radians
-    reloutdir : str
-        Relative location from savefile in which to put output plots.
-    outpre : str, optional
-        String to prepend to filename.
-    """
-
-    logging.info(f'matched filter: loading from {savefile}')
-    u, v, vis, wt, time = load_npy_vis(savefile)
-
-    if ra_off is None:
-        ra_off = [0.]
-        dec_off = [0.]
-
-    # get ra/dec into 1d arrays of positions
-    ra = np.array(ra_off).flatten()
-    dec = np.array(dec_off).flatten()
-
-    times = np.unique(time)
-    v_pos = []
-
-    for t in times:
-
-        ok = time == t
-        vis_mod = uv_shift(u[ok], v[ok], ra, dec)
-        h, _ = h_filter(vis_mod, wt[ok])
-        v_pos.append(np.sqrt(2) * np.real(np.dot(vis[ok], h.conj())))
-
-    v_pos = np.array(v_pos)
-
-    # plots
-    outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
-    if not os.path.exists(outpath):
-        os.mkdir(outpath)
-    dets = []
-    fns = []
-    for i in range(len(ra)):
-        det, fn = smooth_plot(times, v_pos[:, i], det_snr,
-                              outdir=outpath, outfile='.png', ylab='SNR',
-                              outpre=f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}_{np.rad2deg(dec[i])*3600:.3f}.')
-        dets.append(det)
-        fns.append(fn)
-
-    return dets, fns
-
-
-def uvmodelfit_search(msfilepath, ra_off=None, dec_off=None, dt=None,
-                      reloutdir='uvmfit', make_fits=False,
-                      cleanpar=None):
-    """Run uvmodelfit search on a single-scan ms."""
-
-    msfilepath = msfilepath.rstrip('/')
-
-    if ra_off is None:
-        ra_off = [0.]
-        dec_off = [0.]
-
-    # check ms has some non-zero baselines (xcorrelation)
-    ms.open(msfilepath)
-    uvw = ms.getdata('UVW')
-    ms.close()
-    if np.max(uvw['uvw'][0]) == 0:
-        logging.info(f'no non-zero baselines, returning')
-        return
-
-    if type(ra_off) in [list, np.ndarray, tuple]:
-        for ra, dec in zip(ra_off, dec_off):
-            uvmodelfit_search(msfilepath, ra, dec, dt=dt, reloutdir=reloutdir, make_fits=make_fits)
-        return
-
-    outdir = f"{os.path.dirname(msfilepath)}/{reloutdir.rstrip('/')}"
-    if not os.path.exists(outdir):
-        os.mkdir(outdir)
-
-    wdir = outdir
-    if not os.path.exists(wdir):
-        os.mkdir(wdir)
-    if os.path.exists(f'{wdir}/tmp.cl'):
-        shutil.rmtree(f'{wdir}/tmp.cl')
-
-    coords = f'{ra_off:.3f}_{dec_off:.3f}'
-
-    logging.info(f'running uv search for {os.path.basename(msfilepath)}')
-
-    flux = []
-    time = []
-
-    out = listobs(msfilepath)
-
-    for k in out.keys():
-        if 'scan' in k:
-            if dt is None:
-                dt = out[k]['0']['IntegrationTime']
-
-            t0 = out[k]['0']['BeginTime']
-            t1 = out[k]['0']['EndTime']
-            ts = np.arange(t0, t1, dt/(24*60*60))
-
-    cleandir = f'{wdir}/cleans_{coords}'
-    if not os.path.exists(cleandir) and make_fits:
-        os.mkdir(cleandir)
-
-    for i, t in enumerate(ts[:-1]):
-
-        t0_ = mjd2date(t)
-        t1_ = mjd2date(ts[i+1])
-        t0_str = t0_.strftime('%H:%M:%S') + t0_.strftime(".%f")[:2]
-        t1_str = t1_.strftime('%H:%M:%S') + t1_.strftime(".%f")[:2]
-        tmid = (t + ts[i+1])/2
-        time.append(tmid)
-
-        # uvmodelfit, flux is saved in cl as complex
-        if cleanpar is None:
-            cleanpar = {'cell': '0.5arcsec', 'imsize': [256, 256]}
-        uvmodelfit(vis=msfilepath, timerange=f"{t0_str}~{t1_str}",
-                   comptype='P',
-                   sourcepar=[1, ra_off, dec_off], varypar=[True, False, False],
-                   outfile=f'{wdir}/tmp.cl')
-        tb.open(f'{wdir}/tmp.cl')
-        flux.append(np.real(tb.getcol('Flux')[0][0]))
-        tb.close()
-
-        if make_fits:
-            os.system(f'rm -rf {wdir}/tmpimage*')
-            tclean(vis=f'{msfilepath}', imagename=f'{wdir}/tmpimage',
-                   **cleanpar, interactive=False, niter=0,
-                   timerange=f"{t0_str}~{t1_str}")
-            exportfits(imagename=f'{wdir}/tmpimage.image',
-                       fitsimage=f'{cleandir}/{i:04d}.fits')
-
-    tplot = (time-np.min(time))*24*60
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(tplot, flux, '.')
-    ax.set_xlabel('Time / minutes')
-    ax.set_ylabel('Flux / Jy')
-    fig.savefig(f'{outdir}/{coords}_flux_time.png')
-    plt.close(fig)
-    np.save(f'{outdir}/{coords}_timeflux.npy', np.vstack((time, flux)))
-
-    shutil.rmtree(f'{wdir}/tmp.cl')
-    if make_fits:
-        os.system(f'rm -rf {wdir}/tmpimage*')
-
-
 class AlmaVar:
 
     def __init__(self, ms_in=None, ms_avg=None, outdir=None,
-                 det_snr=4, pb_factor=1.6, auto_load=False):
+                 det_snr=4, pb_factor=1.6, auto_load=False,
+                 log_level='WARNING'):
         """Initialise by creating output folder and averaging ms.
 
         Parameters
@@ -671,12 +396,14 @@ class AlmaVar:
         pb_factor : float, optional
             Number of primary beam FWHM for target search/clean images.
             1.6 gives images out to tclean default of pblimit=0.2.
+        logging : str, optional
+            Level of logging, INFO or WARNING.
         """
         # set up some output folders
         if outdir:
-            outdir = outdir.rstrip('/')
+            outdir = os.path.expanduser(outdir.rstrip('/'))
         if ms_in:
-            self.ms_in = ms_in.rstrip('/')
+            self.ms_in = os.path.expanduser(ms_in.rstrip('/'))
             self.ms_in_name = os.path.basename(self.ms_in)
             if outdir is None:
                 outdir = os.path.dirname(ms_in)
@@ -685,10 +412,8 @@ class AlmaVar:
         else:
             if '.avg' not in ms_avg:
                 logging.warning(f'ms_avg should end in ".avg"')
-            ms_avg = ms_avg.rstrip('/')
-            self.ms_in = None
-            self.ms_avg = ms_avg
-            self.wdir = os.path.dirname(f'{ms_avg}/../')
+            self.ms_avg = os.path.expanduser(ms_avg.rstrip('/'))
+            self.wdir = os.path.dirname(f'{self.ms_avg}/../')
 
         self.scandir = f'{self.wdir}/scans'
 
@@ -697,6 +422,9 @@ class AlmaVar:
             os.mkdir(self.wdir)
 
         casalog.setlogfile(f'{self.wdir}/casalog.log')
+        logging.basicConfig(format='%(levelname)s:%(message)s',
+                            level=logging.getLevelName(log_level),
+                            filename=f'{self.wdir}/log.log')
 
         if not os.path.exists(self.scandir):
             os.mkdir(self.scandir)
@@ -732,6 +460,7 @@ class AlmaVar:
         self.split_scans(keep_scan_ms=True)
         self.clean_images()
         self.split_scans(keep_scan_ms=False)  # delete ms files
+        self.diagnostics()
         self.summed_filter()
         self.gaia_matched_filter(min_plx_mas=1)
 
@@ -793,9 +522,13 @@ class AlmaVar:
             self.ms_avg_spws['chavg'] = msmd.almaspws(chavg=True)
         msmd.close()
 
-    def split_scans(self, keep_scan_ms=False, load_scan_vis=False):
+    def split_scans(self, scans=None, keep_scan_ms=False, load_scan_vis=False):
         """Split scans from averaged ms."""
-        scans_sorted = [int(s) for s in self.ms_avg_scan_info.keys()]
+        if scans:
+            scans_sorted = scans
+        else:
+            scans_sorted = [int(s) for s in self.ms_avg_scan_info.keys()]
+
         scans_sorted.sort()
         self.scan_info = {}
         self.scan_vis = {}
@@ -822,6 +555,7 @@ class AlmaVar:
                 scan_avg_ms = f'{scan_no_dir}/{scan_str}.ms'
 
                 if os.path.exists(scan_avg_vis) and not keep_scan_ms:
+                    logging.info(f'loading scan {scan_no} from {scan_avg_vis}')
                     u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
                     self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
                 else:
@@ -829,7 +563,7 @@ class AlmaVar:
 
                     if not os.path.exists(scan_avg_ms):
                         split(vis=self.ms_avg, outputvis=scan_avg_ms,
-                              scan=scan_no, datacolumn='DATA',
+                              scan=scan_no, datacolumn='DATA', keepflags=False,
                               spw=','.join([str(s) for s in self.ms_avg_spws[spw]]))
 
                     # get data from ms
@@ -859,6 +593,82 @@ class AlmaVar:
                 if not keep_scan_ms and os.path.exists(scan_avg_ms):
                     shutil.rmtree(scan_avg_ms)
 
+    def diagnostics(self, scans=None, reloutdir='.',
+                    pcrit=0.001):
+        """Various sanity checks and diagnostic plots.
+
+        Parameters
+        ----------
+        scans : list, optional
+            List of scans to image, default is all scans
+        reloutdir : str
+            Relative location from savefile in which to put output plots.
+        pcrit : float, optional
+            Critical p value below which to flag data as non-normal.
+            Values for calibration scans tend to be <0.0005 or so.
+        """
+        if scans is None:
+            scans = [s for s in self.scan_info.keys()]
+
+        for scan in scans:
+            logging.info(f'sanity checking scan {scan}')
+            u, v, vis, wt, time = load_npy_vis(self.scan_info[scan]['scan_avg_vis'])
+
+            outpath = f"{os.path.dirname(self.scan_info[scan]['scan_avg_vis'])}/{reloutdir}"
+            if not os.path.exists(outpath):
+                os.mkdir(outpath)
+
+            # check normality of distribution at each timestep
+            times = np.unique(time)
+            self.scan_info[scan]['flagged_times'] = np.array([])
+            for i, t in enumerate(times):
+                ok = time == t
+                res = scipy.stats.shapiro(vis.real[ok]*np.sqrt(wt[ok]))
+                res_i = scipy.stats.shapiro(vis.imag[ok]*np.sqrt(wt[ok]))
+                if res_i.pvalue < res.pvalue:
+                    res = res_i
+                if res.pvalue < pcrit:
+                    self.scan_info[scan]['flagged_times'] = np.append(self.scan_info[scan]['flagged_times'], t)
+                    if 'OBSERVE_TARGET#ON_SOURCE' in self.scan_info[scan]['intent']:
+                        logging.warning(f'distribution non-normal with p {res.pvalue:.4f}%')
+                        logging.warning(f' in scan {scan} at time {t} (step {i}) with'
+                                        f" intent {self.scan_info[scan]['intent']}")
+                    else:
+                        logging.info(f'distribution non-normal with p {res.pvalue:.4f}%')
+                        logging.info(f' in scan {scan} at time {t} (step {i}) with'
+                                     f" intent {self.scan_info[scan]['intent']}")
+
+            # check visibility weights sensible
+            # multiply by sqrt(2) assuming Re and Im independent
+            fig, ax = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+            dr = np.sqrt(2)*vis.real*np.sqrt(wt)
+            di = np.sqrt(2)*vis.imag*np.sqrt(wt)
+            mx = 0
+            for a, d, l in zip(ax, [dr, di], ['Real', 'Imag']):
+                x = np.linspace(np.min(d), np.max(d), 100)
+                _ = a.hist(d, bins=100, log=True, label=l)
+                a.plot(x, np.max(_[0])*np.exp(-((x-np.mean(d))**2)/2))
+                a.set_xlabel('snr per visibility')
+                a.legend()
+                if np.max(_[0]) > mx: mx = np.max(_[0])
+            ax[0].set_ylim(0.5, 2*mx)
+            ax[0].set_ylabel('density')
+            fig.tight_layout()
+            fig.savefig(f"{outpath}/{self.scan_info[scan]['scan_str']}_vis_snr.png")
+            plt.close(fig)
+
+            # look at raw and summed data
+            tplot1 = (time-np.min(time))*24*60
+            fig, ax = plt.subplots(2, sharex=True, figsize=(8, 4))
+            ax[0].plot(tplot1, vis.real, '.', label='Real', markersize=0.3)
+            ax[1].plot(tplot1, vis.imag, '.', label='Imag', markersize=0.3)
+            ax[1].set_xlabel('Time / minutes')
+            ax[0].set_ylabel('Real')
+            ax[1].set_ylabel('Imag')
+            fig.tight_layout()
+            fig.savefig(f"{outpath}/{self.scan_info[scan]['scan_str']}_rawvis_time.png")
+            plt.close(fig)
+
     def clean_images(self, scans=None, oversample=3, min_size=256, overwrite=False):
         """Create tclean images for specified scans.
 
@@ -876,6 +686,9 @@ class AlmaVar:
         if scans is None:
             scans = [s for s in self.scan_info.keys()]
 
+        # casa seems to complain about image sizes, use these
+        sizes = np.array([min_size, 320, 360, 384, 480, 500, 512])
+
         for scan in scans:
 
             # check we can make an image (e.g. not for zero baselines)
@@ -887,6 +700,7 @@ class AlmaVar:
             pix_sz = self.scan_info[scan]['spatial_res'].to(un.arcsec).value / 2 / oversample
             img_fov = self.scan_info[scan]['pb_hwhm'].to(un.arcsec).value * 2 * self.pb_factor
             img_sz = int(img_fov / pix_sz)
+            img_sz = sizes[np.argmin(np.abs(img_sz - sizes))]
             if img_sz < min_size:
                 img_sz = min_size
                 pix_sz = img_fov / img_sz
@@ -924,16 +738,17 @@ class AlmaVar:
         if not os.path.exists(link):
             os.symlink(linked, link)
 
-    def summed_filter(self, scans=None):
+    def summed_filter(self, scans=None, plot_vis_hist=False, plot_raw_vis=False):
         """Summed search for specified scans."""
         if scans is None:
             scans = [s for s in self.scan_info.keys()]
 
         for scan in scans:
             if self.scan_info[scan]['nvis'] > 0:
-                det, fn = summed_search(self.scan_info[scan]['scan_avg_vis'],
-                                        self.det_snr,
-                                        outpre=self.scan_info[scan]['scan_str'])
+                det, fn = self.summed_search(scan, self.det_snr,
+                                             outpre=self.scan_info[scan]['scan_str'],
+                                             plot_vis_hist=plot_vis_hist,
+                                             plot_raw_vis=plot_raw_vis)
                 if det:
                     self.link_to_field(fn, scan)
 
@@ -948,10 +763,9 @@ class AlmaVar:
 
         for scan in scans:
             if self.scan_info[scan]['nvis'] > 0:
-                dets, fns = matchedfilter_search(self.scan_info[scan]['scan_avg_vis'],
-                                                 self.det_snr,
-                                                 outpre=self.scan_info[scan]['scan_str'],
-                                                 ra_off=ra_off, dec_off=dec_off)
+                dets, fns = self.matchedfilter_search(scan, self.det_snr,
+                                                      outpre=self.scan_info[scan]['scan_str'],
+                                                      ra_off=ra_off, dec_off=dec_off)
                 for det, fn in zip(dets, fns):
                     if det:
                         self.link_to_field(fn, scan)
@@ -982,7 +796,9 @@ class AlmaVar:
             fits = (f"{self.scan_info[scan]['scan_dir']}/"
                     f"{self.scan_info[scan]['scan_str']}.fits")
             if os.path.exists(fits):
-                plot_fits_sources(fits, r['ra_ep'], r['dec_ep'])
+                plot_fits_sources(fits,
+                                  self.field_gaia[field]['table']['ra_ep'],
+                                  self.field_gaia[field]['table']['dec_ep'])
 
     def gaia_matched_filter(self, scans=None, min_plx_mas=None):
         """Run matched filter for Gaia sources in FOV."""
@@ -1002,3 +818,317 @@ class AlmaVar:
                 self.matched_filter(scans=[scan],
                                     ra_off=self.field_gaia[field]['ra_off'],
                                     dec_off=self.field_gaia[field]['dec_off'])
+
+    def smooth_plot(self, times, v_in, det_snr, scan,
+                    show_sig=True, ylab='$|Sum(V.w)|$',
+                    outdir='.', outpre='', outfile=f'vis_time_smooth.png'):
+        """Diagnostic plot for time series, return True for detection."""
+        tplot2 = (times-np.min(times))*24*60
+        dt = np.median(np.diff(times))*24*60*60  # dt in seconds
+        nw = 60
+        if len(times)/2 < nw:
+            nw = len(times)//2
+        ws = np.arange(nw)+1
+        T = np.zeros((nw, len(times)))
+        wpk = []
+        pk = []
+        snr = []
+
+        vmin = 1e5
+        for i, wi in enumerate(ws):
+            conv = np.convolve(v_in, np.repeat(1, wi)/wi, mode='valid')
+            conv = (conv-np.mean(conv))*np.sqrt(wi) + np.mean(conv)
+            T[i, (wi-1)//2:len(v_in)-wi//2] = conv
+
+            # find significant +ve outliers
+            clipped, _, _ = scipy.stats.sigmaclip(conv)
+            mn, std = np.mean(clipped), np.std(clipped)
+            ok = np.where(T[i] > mn + det_snr*std)[0]
+            for o in ok:
+                wpk.append(wi)
+                pk.append(tplot2[o])
+                snr.append((T[i, o]-mn)/std)
+
+            if np.min(conv) < vmin:
+                vmin = np.min(conv)
+
+        wpk = np.array(wpk)
+        pk = np.array(pk)
+        snr = np.array(snr)
+
+        fig, ax = plt.subplots(2, figsize=(8, 6), sharex=True,
+                               gridspec_kw={'height_ratios': [2, 1]})
+        ax[0].imshow(T, aspect='auto', origin='lower', vmin=vmin,
+                     extent=(np.min(tplot2), np.max(tplot2),
+                             np.min(ws)-0.5, np.max(ws)+0.5))
+        if show_sig and len(snr) > 0:
+            mx = np.argmax(snr)
+            ax[0].plot(pk[mx], wpk[mx], '+k')
+        if len(self.scan_info[scan]['flagged_times']) > 0:
+            fplot = (self.scan_info[scan]['flagged_times']-np.min(times))*24*60
+            ax[1].vlines(fplot, np.min(v_in), np.max(v_in),
+                         linewidth=5, alpha=0.2, color='grey',
+                         label='suspect')
+            ax[1].legend()
+        ax[1].plot(tplot2, v_in, '.', label='$|Sum(V.w)|$')
+        ax[1].set_xlabel('Time / minutes')
+        ax[1].set_ylabel(ylab)
+        ax[0].set_ylabel(f'smoothing width / $\Delta t$={dt:3.2f} seconds')
+        fig.tight_layout()
+        figname = f'{outdir}/{outpre}{outfile}'
+        fig.savefig(figname)
+        plt.close(fig)
+
+        return len(wpk) > 0, figname
+
+    def summed_search(self, scan, det_snr, reloutdir='.', outpre='',
+                      plot_vis_hist=False, plot_raw_vis=False):
+        """Point source position-free search.
+
+        Parameters
+        ----------
+        scan : str
+            Scan to run on.
+        det_snr : float
+            SNR threshold for detection flagging.
+        reloutdir : str
+            Relative location from savefile in which to put output plots.
+        outpre : str, optional
+            String to prepend to filename.
+        plot_vis_hist : bool, optional
+            Plot histogram of visibilities as sanity check.
+        plot_raw_vis : bool, optional
+            Plot raw visibilities as sanity check.
+        """
+        savefile = self.scan_info[scan]['scan_avg_vis']
+        logging.info(f'summed search: loading from {savefile}')
+        u, v, vis, wt, time = load_npy_vis(savefile)
+
+        # unique returns sorted times
+        times = np.unique(time)
+
+        v_abs = []
+        for t in times:
+            ok = time == t
+            v_abs.append(np.dot(np.abs(vis[ok]), np.sqrt(wt[ok])))
+
+        v_abs = np.array(v_abs)
+
+        # check visibility weights sensible
+        # multiply by sqrt(2) assuming Re and Im independent
+        if plot_vis_hist:
+            fig, ax = plt.subplots(1, 2, figsize=(8, 4), sharey=False)
+            _ = ax[0].hist(np.sqrt(2)*vis.real*np.sqrt(wt), bins=100, density=True, label='Real')
+            _ = ax[1].hist(np.sqrt(2)*vis.imag*np.sqrt(wt), bins=100, density=True, label='Imag')
+            x = np.linspace(-3, 3)
+            for a in ax:
+                a.plot(x, np.max(_[0])*np.exp(-(x**2)/2))
+                a.set_xlabel('snr per visibility')
+                a.legend()
+            ax[0].set_ylabel('density')
+            fig.savefig(f'{os.path.dirname(savefile)}/{reloutdir}/{outpre}_vis_snr.png')
+            plt.close(fig)
+
+        # look at raw and summed data
+        if plot_raw_vis:
+            tplot1 = (time-np.min(time))*24*60
+            fig, ax = plt.subplots(2, sharex=True, figsize=(8, 4))
+            ax[0].plot(tplot1, vis.real, '.', label='Real', markersize=0.3)
+            ax[1].plot(tplot1, vis.real, '.', label='Imag', markersize=0.3)
+            ax[1].set_xlabel('Time / minutes')
+            ax[0].set_ylabel('Real')
+            ax[1].set_ylabel('Imag')
+            fig.tight_layout()
+            fig.savefig(f'{os.path.dirname(savefile)}/{reloutdir}/{outpre}_rawvis_time.png')
+            plt.close(fig)
+
+        # smooth light curve and plot
+        outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
+        if not os.path.exists(outpath):
+            os.mkdir(outpath)
+
+        return self.smooth_plot(times, v_abs, det_snr, scan,
+                                outdir=f'{outpath}', outfile=f'{outpre}_sum.png')
+
+    def matchedfilter_search(self, scan, det_snr, ra_off=None, dec_off=None,
+                             reloutdir='matchf', outpre=''):
+        """Run matched filter search on saved set of visibilities.
+
+        Search runs over multiple sources at each time step.
+        vis_mod is the model and h is the matched filter, at each
+        time both have shape [nvis, npt]. The resulting array v_pos
+        has shape [ntime, npt].
+
+        Parameters
+        ----------
+        scan : str
+            Scan to run on.
+        det_snr : float
+            SNR threshold for detection flagging.
+        ra_off, dec_off : numpy array, list, tuple
+            Coordinates for search in radians
+        reloutdir : str
+            Relative location from savefile in which to put output plots.
+        outpre : str, optional
+            String to prepend to filename.
+        """
+        savefile = self.scan_info[scan]['scan_avg_vis']
+        logging.info(f'matched filter: loading from {savefile}')
+        u, v, vis, wt, time = load_npy_vis(savefile)
+
+        if ra_off is None:
+            ra_off = [0.]
+            dec_off = [0.]
+
+        # get ra/dec into 1d arrays of positions
+        ra = np.array(ra_off).flatten()
+        dec = np.array(dec_off).flatten()
+
+        times = np.unique(time)
+        v_pos = []
+
+        for t in times:
+
+            ok = time == t
+            vis_mod = uv_shift(u[ok], v[ok], ra, dec)
+            h, _ = h_filter(vis_mod, wt[ok])
+            v_pos.append(np.sqrt(2) * np.real(np.dot(vis[ok], h.conj())))
+
+        v_pos = np.array(v_pos)
+
+        # plots
+        outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
+        if not os.path.exists(outpath):
+            os.mkdir(outpath)
+        dets = []
+        fns = []
+        for i in range(len(ra)):
+            det, fn = self.smooth_plot(times, v_pos[:, i], det_snr, scan,
+                                       outdir=outpath, outfile='.png', ylab='SNR',
+                                       outpre=f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}_{np.rad2deg(dec[i])*3600:.3f}.')
+            dets.append(det)
+            fns.append(fn)
+
+        return dets, fns
+
+    def uvmodelfit_search(self, msfilepath, ra_off=None, dec_off=None, dt=None,
+                          reloutdir='uvmfit', make_fits=False,
+                          cleanpar=None):
+        """Run uvmodelfit search on a single-scan ms.
+
+        Parameters
+        ----------
+        msfilepath : str
+            Path to ms file.
+        ra_off, dec_off : numpy array, list, tuple
+            Coordinates for search in radians.
+        dt : float, optional
+            Time step, defaults to individual integration time.
+        reloutdir : str, optional
+            Relative location from savefile in which to put output plots.
+        make_fits : bool, optional
+            Make a series of FITS files with images
+        cleanpar : dict, optional
+            Dict of args for tclean, need cell and imsize.
+        """
+
+        msfilepath = msfilepath.rstrip('/')
+
+        if ra_off is None:
+            ra_off = [0.]
+            dec_off = [0.]
+
+        # check ms has some non-zero baselines (xcorrelation)
+        ms.open(msfilepath)
+        uvw = ms.getdata('UVW')
+        ms.close()
+        if np.max(uvw['uvw'][0]) == 0:
+            logging.info(f'no non-zero baselines, returning')
+            return
+
+        if type(ra_off) in [list, np.ndarray, tuple]:
+            make_fits_ = make_fits
+            for ra, dec in zip(ra_off, dec_off):
+                self.uvmodelfit_search(msfilepath, ra, dec, dt=dt, reloutdir=reloutdir,
+                                       cleanpar=cleanpar, make_fits=make_fits_)
+                make_fits_ = False  # only first time around
+            return
+
+        # convert offsets to arcsec
+        ra_off = np.rad2deg(ra_off) * 3600
+        dec_off = np.rad2deg(dec_off) * 3600
+
+        outdir = f"{os.path.dirname(msfilepath)}/{reloutdir.rstrip('/')}"
+        if not os.path.exists(outdir):
+            os.mkdir(outdir)
+
+        wdir = outdir
+        if not os.path.exists(wdir):
+            os.mkdir(wdir)
+        if os.path.exists(f'{wdir}/tmp.cl'):
+            shutil.rmtree(f'{wdir}/tmp.cl')
+
+        coords = f'{ra_off:.3f}_{dec_off:.3f}'
+
+        logging.info(f'running uv search for {os.path.basename(msfilepath)}')
+
+        flux = []
+        time = []
+
+        out = listobs(msfilepath)
+
+        for k in out.keys():
+            if 'scan' in k:
+                if dt is None:
+                    dt = out[k]['0']['IntegrationTime']
+
+                t0 = out[k]['0']['BeginTime']
+                t1 = out[k]['0']['EndTime']
+                ts = np.arange(t0, t1, dt/(24*60*60))
+
+        cleandir = f'{wdir}/cleans'
+        if not os.path.exists(cleandir) and make_fits:
+            os.mkdir(cleandir)
+
+        for i, t in enumerate(ts[:-1]):
+
+            t0_ = mjd2date(t)
+            t1_ = mjd2date(ts[i+1])
+            t0_str = t0_.strftime('%H:%M:%S') + t0_.strftime(".%f")[:2]
+            t1_str = t1_.strftime('%H:%M:%S') + t1_.strftime(".%f")[:2]
+            tmid = (t + ts[i+1])/2
+            time.append(tmid)
+
+            # uvmodelfit, flux is saved in cl as complex
+            uvmodelfit(vis=msfilepath, timerange=f"{t0_str}~{t1_str}",
+                       comptype='P',
+                       sourcepar=[1, ra_off, dec_off], varypar=[True, False, False],
+                       outfile=f'{wdir}/tmp.cl')
+            tb.open(f'{wdir}/tmp.cl')
+            flux.append(np.real(tb.getcol('Flux')[0][0]))
+            tb.close()
+
+            if make_fits:
+                if cleanpar is None:
+                    cleanpar = {'cell': '0.5arcsec', 'imsize': [256, 256]}
+
+                os.system(f'rm -rf {wdir}/tmpimage*')
+                tclean(vis=f'{msfilepath}', imagename=f'{wdir}/tmpimage',
+                       **cleanpar, interactive=False, niter=0,
+                       timerange=f"{t0_str}~{t1_str}")
+                exportfits(imagename=f'{wdir}/tmpimage.image',
+                           fitsimage=f'{cleandir}/{i:04d}.fits')
+
+        tplot = (time-np.min(time))*24*60
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(tplot, flux, '.')
+        ax.set_xlabel('Time / minutes')
+        ax.set_ylabel('Flux / Jy')
+        fig.savefig(f'{outdir}/{coords}_flux_time.png')
+        plt.close(fig)
+        np.save(f'{outdir}/{coords}_timeflux.npy', np.vstack((time, flux)))
+
+        shutil.rmtree(f'{wdir}/tmp.cl')
+        if make_fits:
+            os.system(f'rm -rf {wdir}/tmpimage*')
