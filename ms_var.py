@@ -280,6 +280,8 @@ def plot_fits_sources(fits, ra, dec):
            angle=h[0].header['BPA'],
            facecolor='white', edgecolor='black')
     b.set_hatch('/')
+    fig.tick_labels.set_xformat('hh:mm:ss')
+    fig.tick_labels.set_yformat('dd:mm:ss')
     fig.set_title(fits.replace('.fits', ''))
     fig.savefig(fits.replace('.fits', '.png'))
     fig.close()
@@ -344,7 +346,25 @@ def get_ms_info(msfilepath):
 
 
 def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
-    """Return offsets of Gaia sources from ra/dec in radians."""
+    """Return offsets of Gaia sources from ra/dec in radians.
+
+    Parameters
+    ----------
+    ra, dec : Quantity, angle
+        Center for query
+    radius : Quantity, angle
+        Radius of query
+    date : datetime
+        Date of observation
+    min_plx_mas : float
+        Minimum parallax to apply to query result. Simply a
+        way to cut down returned objects to nearby stars.
+
+    Returns
+    -------
+    tuple
+        RA/Dec offsets of targets in radians, and full result table.
+    """
     coord = SkyCoord(ra=ra, dec=dec, frame='icrs')
     logging.info(f'get_gaia_offsets: search at {ra}, {dec}')
 
@@ -363,11 +383,13 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     r['ra_ep'][nopm] = r['ra'][nopm]
     r['dec_ep'][nopm] = r['dec'][nopm]
 
-    # convert to offsets
-    ra_off = np.array((r['ra_ep']- ra).to(un.rad).value)
+    # convert to sky offsets w.r.t. query center
+    ra_off = np.array((r['ra_ep'] - ra).to(un.rad).value)
     dec_off = np.array((r['dec_ep'] - dec).to(un.rad).value)
     ra_off = (ra_off + np.pi) % (2 * np.pi) - np.pi
     dec_off = (dec_off + np.pi) % (2 * np.pi) - np.pi
+    # RA offset is ra x cos(dec)
+    ra_off *= np.cos(dec.to(un.rad).value)
 
     return ra_off, dec_off, r
 
@@ -464,8 +486,22 @@ class AlmaVar:
         self.summed_filter()
         self.gaia_matched_filter(min_plx_mas=1)
 
-    def avg_ms_in(self, nchan_spw=1, spw_include=None):
-        """Average ms_in down to fewer channels per spw."""
+    def avg_ms_in(self, nchan_spw=1, intent='OBSERVE_TARGET#ON_SOURCE',
+                  spw_include=None):
+        """Average ms_in down to fewer channels per spw.
+
+        Parameters
+        ----------
+        nchan_spw : int, optional
+            Number of channels per spw to average down to.
+        intent : str or list of str, optional
+            Intents to extract from input ms file, e.g. use
+            'OBSERVE_TARGET#ON_SOURCE' to skip calibration scans.
+        spw_include : dict, optional
+            Dict of spw types to include, default is
+            {'tfdm': True, 'sqld': False, 'chavg': False}
+            and not really expected the others will be used.
+        """
 
         if spw_include is None:
             spw_include = {'tfdm': True,
@@ -502,7 +538,7 @@ class AlmaVar:
             logging.info(f'keeping spws:{spw_list}, widths:{avg_list}')
             split(vis=self.ms_in, outputvis=self.ms_avg, keepflags=False,
                   spw=','.join([str(s) for s in spw_list]), width=avg_list,
-                  datacolumn=self.ms_in_datacol)
+                  datacolumn=self.ms_in_datacol, intent=intent)
         else:
             logging.info('loading averaged ms')
 
@@ -613,6 +649,8 @@ class AlmaVar:
         for scan in scans:
             logging.info(f'sanity checking scan {scan}')
             u, v, vis, wt, time = load_npy_vis(self.scan_info[scan]['scan_avg_vis'])
+            if len(vis) == 0:
+                continue
 
             outpath = f"{os.path.dirname(self.scan_info[scan]['scan_avg_vis'])}/{reloutdir}"
             if not os.path.exists(outpath):
@@ -701,9 +739,7 @@ class AlmaVar:
             img_fov = self.scan_info[scan]['pb_hwhm'].to(un.arcsec).value * 2 * self.pb_factor
             img_sz = int(img_fov / pix_sz)
             img_sz = sizes[np.argmin(np.abs(img_sz - sizes))]
-            if img_sz < min_size:
-                img_sz = min_size
-                pix_sz = img_fov / img_sz
+            pix_sz = img_fov / img_sz
 
             outfits = (f"{self.scan_info[scan]['scan_dir']}/"
                        f"{self.scan_info[scan]['scan_str']}.fits")
@@ -1005,7 +1041,7 @@ class AlmaVar:
         for i in range(len(ra)):
             det, fn = self.smooth_plot(times, v_pos[:, i], det_snr, scan,
                                        outdir=outpath, outfile='.png', ylab='SNR',
-                                       outpre=f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}_{np.rad2deg(dec[i])*3600:.3f}.')
+                                       outpre=f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}_{np.rad2deg(dec[i])*3600:.3f}')
             dets.append(det)
             fns.append(fn)
 
