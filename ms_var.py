@@ -201,7 +201,7 @@ def h_filter(vis, wt):
     vis : numpy array of complex
         Model visibilities, 1d [nvis x nptsrc] or 2d [nvis, nptsrc]
     wt : numpy array
-        Data weights, 1d (nvis)
+        Data weights, 1d [nvis]
     """
 
     #     R_inv = np.identity(len(wt))
@@ -219,11 +219,11 @@ def h_filter(vis, wt):
     return h, norm
 
 
-def uv_shift(u, v, ra, dec, flatxy=False):
+def ptsrc_vis(u, v, ra, dec, flatxy=False):
     """Return visibilities of a point source at some ra/dec offset.
 
-    Most of the time is in the exponential, and
-    fiddling the outer product doesn't seem to help.
+    Most of the computation time is in the exponential, and
+    fiddling the outer product doesn't help much.
 
     Parameters
     ----------
@@ -249,6 +249,7 @@ def uv_shift(u, v, ra, dec, flatxy=False):
 
 
 def mjd2date(d):
+    """Return a datetime object given an MJD."""
     t0 = datetime.datetime(1, 1, 1, 12)
     dt = datetime.timedelta(2400000.5 + d - 1721426.0)
     return t0 + dt
@@ -258,6 +259,13 @@ def plot_fits_sources(fits, ra, dec):
     """Plot sources on a FITS image.
 
     Multiple hacks needed...
+
+    Parameters
+    ----------
+    fits: str
+        Path to FITS file to plot.
+    ra,dec : list
+        Lists of RA and Dec of objects to include on plot.
     """
 
     # fix for UTC in fits file, but astropy wants utc
@@ -288,12 +296,17 @@ def plot_fits_sources(fits, ra, dec):
 
 
 def get_ms_info(msfilepath):
-    """Get various pieces of info from an ms.
+    """Return various pieces of info from an ms.
 
     Primary beam, Technical Handbook S10.3.1
 
     Resolution approximation from:
     https://almascience.eso.org/about-alma/alma-basics
+
+    Parameters
+    ----------
+    msfilepath : str
+        Path to .ms file.
     """
     tb.open(msfilepath)
     uvw = tb.getcol("UVW")
@@ -1027,7 +1040,7 @@ class AlmaVar:
         for t in times:
 
             ok = time == t
-            vis_mod = uv_shift(u[ok], v[ok], ra, dec)
+            vis_mod = ptsrc_vis(u[ok], v[ok], ra, dec)
             h, _ = h_filter(vis_mod, wt[ok])
             v_pos.append(np.sqrt(2) * np.real(np.dot(vis[ok], h.conj())))
 
