@@ -418,7 +418,7 @@ class AlmaVar:
         pb_factor : float, optional
             Number of primary beam FWHM for target search/clean images.
             1.6 gives images out to tclean default of pblimit=0.2.
-        logging : str, optional
+        log_level : str, optional
             Level of logging, INFO or WARNING.
         """
         # set up some output folders
@@ -688,7 +688,8 @@ class AlmaVar:
                 a.plot(x, np.max(_[0])*np.exp(-((x-np.mean(d))**2)/2))
                 a.set_xlabel('snr per visibility')
                 a.legend()
-                if np.max(_[0]) > mx: mx = np.max(_[0])
+                if np.max(_[0]) > mx:
+                    mx = np.max(_[0])
             ax[0].set_ylim(0.5, 2*mx)
             ax[0].set_ylabel('density')
             fig.tight_layout()
@@ -1041,7 +1042,8 @@ class AlmaVar:
         for i in range(len(ra)):
             det, fn = self.smooth_plot(times, v_pos[:, i], det_snr, scan,
                                        outdir=outpath, outfile='.png', ylab='SNR',
-                                       outpre=f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}_{np.rad2deg(dec[i])*3600:.3f}')
+                                       outpre=(f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}'
+                                               f'_{np.rad2deg(dec[i])*3600:.3f}')
             dets.append(det)
             fns.append(fn)
 
