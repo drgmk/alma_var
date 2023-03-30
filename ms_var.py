@@ -310,12 +310,15 @@ def get_ms_info(msfilepath):
     """
     tb.open(msfilepath)
     uvw = tb.getcol("UVW")
+    obsids = np.unique(tb.getcol('OBSERVATION_ID'))
     times = tb.getcol("TIME") / (24*60*60)
     tb.close()
 
     msmd.open(msfilepath)
     diams = msmd.antennadiameter()
-    spws = msmd.spwsforscans()
+    spws = {}
+    for obsid in obsids:
+        spws = {**spws, **msmd.spwsforscans(obsid=obsid)}
     spws = np.unique(np.array([spws[k] for k in spws.keys()]).flatten())
 
     diam = np.mean([diams[k]['value'] for k in diams.keys()]) \
@@ -457,9 +460,9 @@ class AlmaVar:
             os.mkdir(self.wdir)
 
         casalog.setlogfile(f'{self.wdir}/casalog.log')
-        logging.basicConfig(format='%(levelname)s:%(message)s',
-                            level=logging.getLevelName(log_level),
-                            filename=f'{self.wdir}/log.log')
+        logging.basicConfig(filename=f'{self.wdir}/log.log',
+                            format='%(levelname)s:%(message)s',
+                            level=logging.getLevelName(log_level))
 
         if not os.path.exists(self.scandir):
             os.mkdir(self.scandir)
@@ -1056,7 +1059,7 @@ class AlmaVar:
             det, fn = self.smooth_plot(times, v_pos[:, i], det_snr, scan,
                                        outdir=outpath, outfile='.png', ylab='SNR',
                                        outpre=(f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}'
-                                               f'_{np.rad2deg(dec[i])*3600:.3f}')
+                                               f'_{np.rad2deg(dec[i])*3600:.3f}'))
             dets.append(det)
             fns.append(fn)
 
