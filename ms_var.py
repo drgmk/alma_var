@@ -24,13 +24,16 @@ except NameError:
     from astroquery.gaia import Gaia
     from astropy.coordinates import SkyCoord
 
+    # set up logger here, need to pre-empt implicit starting
+    # of logger otherwise with casatasks import
     import casatools.logsink
+    casalog = casatools.logsink('/tmp/casa.log')
+    casalog.setglobal()
     import casatools.ms
     import casatools.msmetadata
     import casatools.table
     from casatasks import listobs, uvmodelfit, tclean, split, exportfits
 
-    casalog = casatools.logsink()
     ms = casatools.ms()
     msmd = casatools.msmetadata()
     tb = casatools.table()
@@ -456,13 +459,19 @@ class AlmaVar:
         self.scandir = f'{self.wdir}/scans'
 
         if not os.path.exists(self.wdir):
-            logging.info(f'creating output folder {self.wdir}')
             os.mkdir(self.wdir)
 
-        casalog.setlogfile(f'{self.wdir}/casalog.log')
-        logging.basicConfig(filename=f'{self.wdir}/log.log',
+        # setting log with modular casa doesn't work
+        # casalog = casatools.logsink()
+        # casalog.setglobal()
+        casalog.setlogfile(f'{self.wdir}/casa.log')
+        casalog.filterMsg(['Restoring with an empty model image'])  # don't need this warning
+        logging.basicConfig(filename=f'{self.wdir}/almavar.log',
                             format='%(levelname)s:%(message)s',
-                            level=logging.getLevelName(log_level))
+                            level=logging.getLevelName(log_level),
+                            force=True)
+
+        logging.info(f'output folder {self.wdir}')
 
         if not os.path.exists(self.scandir):
             os.mkdir(self.scandir)
