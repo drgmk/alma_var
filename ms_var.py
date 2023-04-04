@@ -319,6 +319,8 @@ def get_ms_info(msfilepath):
 
     msmd.open(msfilepath)
     diams = msmd.antennadiameter()
+    if len(np.unique(diams)) > 1:
+        logging.warning(f'more than one antenna diameter in {msfilepath}')
     spws = {}
     for obsid in obsids:
         spws = {**spws, **msmd.spwsforscans(obsid=obsid)}
@@ -359,6 +361,7 @@ def get_ms_info(msfilepath):
             'mean_time': meantime,
             'field_id': field_id,
             'field_name': field_name,
+            'diams': diams,
             'intent': intent}
 
     return info
@@ -461,9 +464,6 @@ class AlmaVar:
         if not os.path.exists(self.wdir):
             os.mkdir(self.wdir)
 
-        # setting log with modular casa doesn't work
-        # casalog = casatools.logsink()
-        # casalog.setglobal()
         casalog.setlogfile(f'{self.wdir}/casa.log')
         casalog.filterMsg(['Restoring with an empty model image'])  # don't need this warning
         logging.basicConfig(filename=f'{self.wdir}/almavar.log',
@@ -639,10 +639,9 @@ class AlmaVar:
                     info['spw'] = spw
                     info['scan_avg_ms'] = scan_avg_ms
                     info['scan_avg_vis'] = scan_avg_vis
+                    if len(info['diams']) > 1:
+                        logging.warning(f'scan {scan_no} has antenna diams {info["diams"]}')
                     self.scan_info[scan_no] = info
-                    # info has Quantities so json doesn't work
-                    # with open(scan_avg_info, 'w') as fh:
-                    #     json.dump(info, fh)
                     np.save(scan_avg_info, info)
 
                 if load_scan_vis:
