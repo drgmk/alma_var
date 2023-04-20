@@ -612,7 +612,7 @@ class AlmaVar:
         self.gaia_matched_filter(min_plx_mas=1)
 
     def avg_ms_in(self, nchan_spw=1, intent='OBSERVE_TARGET#ON_SOURCE',
-                  spw_include=None, subtract=True):
+                  spw_include=None, clean=True, subtract=True):
         """Average ms_in down to fewer channels per spw.
 
         The resulting ms has the averaged visibilities in DATA, and if
@@ -629,8 +629,10 @@ class AlmaVar:
             Dict of spw types to include, default is
             {'tfdm': True, 'sqld': False, 'chavg': False}
             and not really expected the others will be used.
+        clean : bool, optional
+            Create clean images
         subtract : bool, optional
-            Subtract a model of the averaged ms.
+            Subtract a model of the averaged ms. Requires clean=True.
         """
 
         if spw_include is None:
@@ -673,11 +675,12 @@ class AlmaVar:
             logging.info('loading averaged ms')
 
         # make images and subtract continuum model
-        avg_clean = f'{self.wdir}/ms_avg.raw.fits'
-        clean_image(self.ms_avg, avg_clean, 'data', subtract=True)
-        avg_clean_sub = f'{self.wdir}/ms_avg.sub.fits'
-        if subtract and not os.path.exists(avg_clean_sub):
-            clean_image(f'{self.ms_avg}', avg_clean_sub, 'corrected')
+        if clean:
+            avg_clean = f'{self.wdir}/ms_avg.raw.fits'
+            clean_image(self.ms_avg, avg_clean, 'data', subtract=True)
+            avg_clean_sub = f'{self.wdir}/ms_avg.sub.fits'
+            if subtract and not os.path.exists(avg_clean_sub):
+                clean_image(f'{self.ms_avg}', avg_clean_sub, 'corrected')
 
         # now fill some info for averaged ms
         ms.open(self.ms_avg)
