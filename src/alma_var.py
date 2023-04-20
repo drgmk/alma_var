@@ -587,8 +587,6 @@ class AlmaVar:
             if 'CORRECTED_DATA' not in tb.colnames():
                 self.ms_in_datacol = 'DATA'
             tb.close()
-        else:
-            self.avg_ms_in()
 
         # some things (that might get filled later)
         self.pb_factor = pb_factor
