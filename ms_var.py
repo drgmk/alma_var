@@ -46,6 +46,23 @@ except NameError:
     logging.getLogger('astropy').setLevel(logging.WARNING)
 
 
+def parallel(ms_in, outdir):
+    """Helper to run multiprocessing, use with pool.starmap.
+
+    Run with commands like:
+    import ms_var
+    import glob
+    import multiprocessing
+    fs = glob.glob('/path/to/ms*')
+    outdir = '/path/to/outdir
+    listoftuples = [(f, outdir) for f in fs]
+    with multiprocessing.Pool() as pool:
+        pool.starmap(ms_var.parallel, listoftuples)
+    """
+    av = AlmaVar(ms_in=ms_in, outdir=outdir)
+    av.process()
+
+
 def export_ms(msfilename, xcor=True, acor=False):
     """Direct copy of Luca Matra's export.
     https://github.com/dlmatra/miao
@@ -319,15 +336,20 @@ def get_ms_info(msfilepath):
 
     msmd.open(msfilepath)
     diams = msmd.antennadiameter()
-    if len(np.unique(diams)) > 1:
+    diam_unit = un.Unit(diams['0']['unit'])
+    diams = [diams[k]['value'] for k in diams.keys()]
+    unique_diams = np.unique(diams)
+    diams = diams * diam_unit
+    if len(unique_diams) > 1:
         logging.warning(f'more than one antenna diameter in {msfilepath}')
-    spws = {}
+    spws = np.array([], dtype=int)
     for obsid in obsids:
-        spws = {**spws, **msmd.spwsforscans(obsid=obsid)}
-    spws = np.unique(np.array([spws[k] for k in spws.keys()]).flatten())
+        tmp = msmd.spwsforscans(obsid=obsid)
+        for k in tmp.keys():
+            spws = np.append(spws, tmp[k])
+    spws = np.unique(np.array(spws))
 
-    diam = np.mean([diams[k]['value'] for k in diams.keys()]) \
-        * un.Unit(diams['0']['unit'])
+    diam = np.mean(diams)
     freqs = [msmd.reffreq(s) for s in spws]
     freqs = [k['m0']['value'] for k in freqs]*un.Unit(freqs[0]['m0']['unit'])
     meanfreq = np.mean(freqs)
@@ -341,7 +363,7 @@ def get_ms_info(msfilepath):
     else:
         res = 76 / max_b_km / meanfreq.to('GHz').value * un.arcsec
 
-    field_id = np.unique([msmd.fieldsforspw(s) for s in spws])
+    field_id = np.unique([f for s in spws for f in msmd.fieldsforspw(s)])
     if len(field_id) > 1:
         logging.warning(f'{len(field_id)} fields for spws {spws}')
     field_id = field_id[0]
@@ -361,10 +383,87 @@ def get_ms_info(msfilepath):
             'mean_time': meantime,
             'field_id': field_id,
             'field_name': field_name,
-            'diams': diams,
+            'diams': unique_diams,
             'intent': intent}
 
     return info
+
+
+def clean_image(ms, outfits, datacolumn,
+                niter=50000, cycleniter=500, nsigma=3,
+                oversample=3, pb_factor=1.6,
+                overwrite=False, tmpimage=None,
+                subtract=False):
+    """Make a clean image from an ms file.
+
+    Parameters
+    ----------
+    ms : str
+        Path to ms file.
+    outfits : str
+        Path of output FITS file.
+    datacolumn : str
+        Datacolumn from ms to use for clean.
+    oversample : int, optional
+        Factor to oversample PSF in images (pixel size = res / 2 / oversample).
+    pb_factor : float, optional
+        Number of primary beam FWHM for target search/clean images.
+        1.6 gives images out to tclean default of pblimit=0.2.
+    overwrite : bool, optional
+        Overwrite existing FITS files.
+    tmpimage : str, optional
+        Path to temporary images while cleaning.
+    subtract : bool, optional
+        Subtract a model of the image and put in the CORRECTED column.
+    """
+
+    info = get_ms_info(ms)
+
+    if tmpimage is None:
+        tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,10000))}'
+
+    # get a sensible looking image. pblimit is by default 0.2, but fwhm is 0.5,
+    sizes = np.array([256, 320, 360, 384, 480, 500, 512, 1024, 2048])
+    res_arcsec = info['spatial_res'].to(un.arcsec).value
+    pix_sz = res_arcsec / 2 / oversample
+    res_pix = res_arcsec / pix_sz
+    img_fov = info['pb_hwhm'].to(un.arcsec).value * 2 * pb_factor
+    img_sz = int(img_fov / pix_sz)
+    img_sz = sizes[np.argmin(np.abs(img_sz - sizes))]
+    pix_sz = img_fov / img_sz
+
+    if not overwrite and os.path.exists(outfits):
+        logging.info(f'image {outfits} exists')
+        return
+
+    logging.info(f'making image {outfits} with cell:{pix_sz}, size:{img_sz}')
+
+    if overwrite and os.path.exists(outfits):
+        os.unlink(outfits)
+
+    tclean(vis=ms, imagename=tmpimage,
+           cell=f'{pix_sz}arcsec', imsize=[img_sz, img_sz],
+           niter=niter, cycleniter=cycleniter, nsigma=nsigma,
+           gain=0.2, deconvolver='multiscale', scales=[0, int(res_pix), int(4*res_pix)],
+           interactive=False,
+           datacolumn=datacolumn)
+    exportfits(imagename=f'{tmpimage}.image',
+               fitsimage=outfits)
+
+    # subtract model from data
+    if subtract:
+        logging.info(f'model subtracted from visibilities in {ms}')
+        # clear CORRECTED column, it will be filled from DATA each time
+        tb.open(ms, nomodify=False)
+        if 'CORRECTED_DATA' in tb.colnames():
+            tb.removecols("CORRECTED_DATA")
+        tb.close()
+        # ft uses model (Jy/pix), not image (Jy/beam)
+        ft(vis=ms, model=f'{tmpimage}.model',
+           usescratch=True, incremental=False)
+        uvsub(vis=ms)
+
+    os.system(f'rm -rf {tmpimage}*')
 
 
 def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
@@ -487,6 +586,7 @@ class AlmaVar:
             self.ms_in_datacol = 'CORRECTED'
             if 'CORRECTED_DATA' not in tb.colnames():
                 self.ms_in_datacol = 'DATA'
+            tb.close()
         else:
             self.avg_ms_in()
 
@@ -512,8 +612,11 @@ class AlmaVar:
         self.gaia_matched_filter(min_plx_mas=1)
 
     def avg_ms_in(self, nchan_spw=1, intent='OBSERVE_TARGET#ON_SOURCE',
-                  spw_include=None):
+                  spw_include=None, subtract=True):
         """Average ms_in down to fewer channels per spw.
+
+        The resulting ms has the averaged visibilities in DATA, and if
+        the subtraction is done, a subtracted set in CORRECTED_DATA.
 
         Parameters
         ----------
@@ -526,6 +629,8 @@ class AlmaVar:
             Dict of spw types to include, default is
             {'tfdm': True, 'sqld': False, 'chavg': False}
             and not really expected the others will be used.
+        subtract : bool, optional
+            Subtract a model of the averaged ms.
         """
 
         if spw_include is None:
@@ -567,6 +672,13 @@ class AlmaVar:
         else:
             logging.info('loading averaged ms')
 
+        # make images and subtract continuum model
+        avg_clean = f'{self.wdir}/ms_avg.raw.fits'
+        clean_image(self.ms_avg, avg_clean, 'data', subtract=True)
+        avg_clean_sub = f'{self.wdir}/ms_avg.sub.fits'
+        if subtract and not os.path.exists(avg_clean_sub):
+            clean_image(f'{self.ms_avg}', avg_clean_sub, 'corrected')
+
         # now fill some info for averaged ms
         ms.open(self.ms_avg)
         self.ms_avg_scan_info = ms.getscansummary()
@@ -583,8 +695,20 @@ class AlmaVar:
             self.ms_avg_spws['chavg'] = msmd.almaspws(chavg=True)
         msmd.close()
 
-    def split_scans(self, scans=None, keep_scan_ms=False, load_scan_vis=False):
-        """Split scans from averaged ms."""
+    def split_scans(self, scans=None, datacolumn='CORRECTED', keep_scan_ms=False, load_scan_vis=False):
+        """Split scans from averaged ms.
+
+        Parameters
+        ----------
+        scans : list, optional
+            List of scans to image, default is all scans
+        datacolumn : str, optional
+            Data column to split out, CORRECTED has average image subtracted
+        keep_scan_ms : bool, optional
+            Keep scan ms file
+        load_scan_vis : bool, optional
+            Load scan visibilities into this object.
+        """
         if scans:
             scans_sorted = scans
         else:
@@ -620,11 +744,11 @@ class AlmaVar:
                     u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
                     self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
                 else:
-                    logging.info(f'splitting scan {scan_no} from {scan_avg_ms}')
+                    logging.info(f'splitting scan {scan_no} from {scan_avg_ms} using {datacolumn}')
 
                     if not os.path.exists(scan_avg_ms):
                         split(vis=self.ms_avg, outputvis=scan_avg_ms,
-                              scan=scan_no, datacolumn='DATA', keepflags=False,
+                              scan=scan_no, datacolumn=datacolumn, keepflags=False,
                               spw=','.join([str(s) for s in self.ms_avg_spws[spw]]))
 
                     # get data from ms
@@ -685,18 +809,22 @@ class AlmaVar:
             self.scan_info[scan]['flagged_times'] = np.array([])
             for i, t in enumerate(times):
                 ok = time == t
-                res = scipy.stats.shapiro(vis.real[ok]*np.sqrt(wt[ok]))
-                res_i = scipy.stats.shapiro(vis.imag[ok]*np.sqrt(wt[ok]))
-                if res_i.pvalue < res.pvalue:
-                    res = res_i
-                if res.pvalue < pcrit:
+                if np.sum(ok) > 3:
+                    res = scipy.stats.shapiro(vis.real[ok]*np.sqrt(wt[ok]))
+                    res_i = scipy.stats.shapiro(vis.imag[ok]*np.sqrt(wt[ok]))
+                    if res_i.pvalue < res.pvalue:
+                        res = res_i
+                    pvalue = res.pvalue
+                else:
+                    pvalue = pcrit
+                if pvalue <= pcrit:
                     self.scan_info[scan]['flagged_times'] = np.append(self.scan_info[scan]['flagged_times'], t)
                     if 'OBSERVE_TARGET#ON_SOURCE' in self.scan_info[scan]['intent']:
-                        logging.warning(f'distribution non-normal with p {res.pvalue:.4f}%')
+                        logging.warning(f'distribution non-normal with p {pvalue:.4f}%')
                         logging.warning(f' in scan {scan} at time {t} (step {i}) with'
                                         f" intent {self.scan_info[scan]['intent']}")
                     else:
-                        logging.info(f'distribution non-normal with p {res.pvalue:.4f}%')
+                        logging.info(f'distribution non-normal with p {pvalue:.4f}%')
                         logging.info(f' in scan {scan} at time {t} (step {i}) with'
                                      f" intent {self.scan_info[scan]['intent']}")
 
@@ -732,25 +860,18 @@ class AlmaVar:
             fig.savefig(f"{outpath}/{self.scan_info[scan]['scan_str']}_rawvis_time.png")
             plt.close(fig)
 
-    def clean_images(self, scans=None, oversample=3, min_size=256, overwrite=False):
+    def clean_images(self, scans=None, overwrite=False):
         """Create tclean images for specified scans.
 
         Parameters
         ----------
         scans : list, optional
             List of scans to image, default is all scans
-        oversample : int
-            Factor to oversample PSF in images (pixel size = res / 2 / oversample).
-        min_size : int
-            Minimum x/y size for image.
         overwrite : bool, optional
             Overwrite existing FITS files.
         """
         if scans is None:
             scans = [s for s in self.scan_info.keys()]
-
-        # casa seems to complain about image sizes, use these
-        sizes = np.array([min_size, 320, 360, 384, 480, 500, 512])
 
         for scan in scans:
 
@@ -759,31 +880,16 @@ class AlmaVar:
                 logging.info(f'skipping scan {scan}, no baselines')
                 continue
 
-            # get a sensible looking image. pblimit is by default 0.2, but fwhm is 0.5,
-            pix_sz = self.scan_info[scan]['spatial_res'].to(un.arcsec).value / 2 / oversample
-            img_fov = self.scan_info[scan]['pb_hwhm'].to(un.arcsec).value * 2 * self.pb_factor
-            img_sz = int(img_fov / pix_sz)
-            img_sz = sizes[np.argmin(np.abs(img_sz - sizes))]
-            pix_sz = img_fov / img_sz
-
             outfits = (f"{self.scan_info[scan]['scan_dir']}/"
                        f"{self.scan_info[scan]['scan_str']}.fits")
 
             if not overwrite and os.path.exists(outfits):
                 continue
 
-            logging.info(f'making image {outfits} with cell:{pix_sz}, size:{img_sz}')
-
             if overwrite and os.path.exists(outfits):
                 os.unlink(outfits)
 
-            tclean(vis=f"{self.scan_info[scan]['scan_avg_ms']}",
-                   imagename=f'{self.wdir}/tmpimage',
-                   cell=f'{pix_sz}arcsec', imsize=[img_sz, img_sz],
-                   interactive=False, niter=0)
-            exportfits(imagename=f'{self.wdir}/tmpimage.image',
-                       fitsimage=outfits)
-            os.system(f'rm -rf {self.wdir}/tmpimage*')
+            clean_image(self.scan_info[scan]['scan_avg_ms'], outfits, 'data', niter=0)
 
     def link_to_field(self, file, scan):
         """Symlink a file in a field directory."""
@@ -1127,8 +1233,9 @@ class AlmaVar:
         wdir = outdir
         if not os.path.exists(wdir):
             os.mkdir(wdir)
-        if os.path.exists(f'{wdir}/tmp.cl'):
-            shutil.rmtree(f'{wdir}/tmp.cl')
+        cl = f'/tmp/{str(np.random.randint(0,10000))}.cl'
+        if os.path.exists(cl):
+            shutil.rmtree(cl)
 
         coords = f'{ra_off:.3f}_{dec_off:.3f}'
 
@@ -1165,8 +1272,8 @@ class AlmaVar:
             uvmodelfit(vis=msfilepath, timerange=f"{t0_str}~{t1_str}",
                        comptype='P',
                        sourcepar=[1, ra_off, dec_off], varypar=[True, False, False],
-                       outfile=f'{wdir}/tmp.cl')
-            tb.open(f'{wdir}/tmp.cl')
+                       outfile=cl)
+            tb.open(cl)
             flux.append(np.real(tb.getcol('Flux')[0][0]))
             tb.close()
 
@@ -1174,11 +1281,12 @@ class AlmaVar:
                 if cleanpar is None:
                     cleanpar = {'cell': '0.5arcsec', 'imsize': [256, 256]}
 
-                os.system(f'rm -rf {wdir}/tmpimage*')
-                tclean(vis=f'{msfilepath}', imagename=f'{wdir}/tmpimage',
+                tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,10000))}'
+                os.system(f'rm -rf {tmpimage}')
+                tclean(vis=f'{msfilepath}', imagename=tmpimage,
                        **cleanpar, interactive=False, niter=0,
                        timerange=f"{t0_str}~{t1_str}")
-                exportfits(imagename=f'{wdir}/tmpimage.image',
+                exportfits(imagename=tmpimage,
                            fitsimage=f'{cleandir}/{i:04d}.fits')
 
         tplot = (time-np.min(time))*24*60
@@ -1191,6 +1299,6 @@ class AlmaVar:
         plt.close(fig)
         np.save(f'{outdir}/{coords}_timeflux.npy', np.vstack((time, flux)))
 
-        shutil.rmtree(f'{wdir}/tmp.cl')
+        shutil.rmtree(cl)
         if make_fits:
-            os.system(f'rm -rf {wdir}/tmpimage*')
+            os.system(f'rm -rf {tmpimage}*')
