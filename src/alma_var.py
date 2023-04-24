@@ -32,7 +32,7 @@ except NameError:
     import casatools.ms
     import casatools.msmetadata
     import casatools.table
-    from casatasks import listobs, uvmodelfit, tclean, split, exportfits
+    from casatasks import listobs, uvmodelfit, tclean, split, exportfits, ft, uvsub
 
     ms = casatools.ms()
     msmd = casatools.msmetadata()
@@ -46,20 +46,35 @@ except NameError:
     logging.getLogger('astropy').setLevel(logging.WARNING)
 
 
-def parallel(ms_in, outdir):
+def parallel_ms_in(ms_in, outdir):
     """Helper to run multiprocessing, use with pool.starmap.
 
     Run with commands like:
-    import ms_var
+    import alma_var
     import glob
     import multiprocessing
     fs = glob.glob('/path/to/ms*')
     outdir = '/path/to/outdir
     listoftuples = [(f, outdir) for f in fs]
     with multiprocessing.Pool() as pool:
-        pool.starmap(ms_var.parallel, listoftuples)
+        pool.starmap(alma_var.parallel, listoftuples)
     """
-    av = AlmaVar(ms_in=ms_in, outdir=outdir)
+    av = AlmaVar(ms_in=ms_in, outdir=outdir, log_level='INFO')
+    av.process()
+
+
+def parallel_ms_avg(ms_avg):
+    """Helper to run multiprocessing, use with pool.starmap.
+
+    Run with commands like:
+    import alma_var
+    import glob
+    import multiprocessing
+    fs = glob.glob('/path/to/ms*')
+    with multiprocessing.Pool() as pool:
+        pool.map(alma_var.parallel, fs)
+    """
+    av = AlmaVar(ms_avg=ms_avg, log_level='INFO')
     av.process()
 
 
@@ -389,7 +404,7 @@ def get_ms_info(msfilepath):
     return info
 
 
-def clean_image(ms, outfits, datacolumn,
+def clean_image(ms, datacolumn, outpath=None,
                 niter=50000, cycleniter=500, nsigma=3,
                 oversample=3, pb_factor=1.6,
                 overwrite=False, tmpimage=None,
@@ -400,10 +415,16 @@ def clean_image(ms, outfits, datacolumn,
     ----------
     ms : str
         Path to ms file.
-    outfits : str
-        Path of output FITS file.
     datacolumn : str
         Datacolumn from ms to use for clean.
+    outpath : str, optional
+        Path of output FITS file, default is ms path of ms.
+    niter : int, optional
+        Number of total clean iterations.
+    cycleniter : int, optional
+        Number of iterations per clean cycle.
+    nsigma : float, optional
+        N sigma at which to automatically stop cleaning.
     oversample : int, optional
         Factor to oversample PSF in images (pixel size = res / 2 / oversample).
     pb_factor : float, optional
@@ -418,6 +439,10 @@ def clean_image(ms, outfits, datacolumn,
     """
 
     info = get_ms_info(ms)
+    if outpath is None:
+        outpath = os.path.dirname(ms)
+
+    outpath = os.path.expanduser(outpath.rstrip('/'))
 
     if tmpimage is None:
         tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,10000))}'
@@ -432,38 +457,53 @@ def clean_image(ms, outfits, datacolumn,
     img_sz = sizes[np.argmin(np.abs(img_sz - sizes))]
     pix_sz = img_fov / img_sz
 
-    if not overwrite and os.path.exists(outfits):
-        logging.info(f'image {outfits} exists')
-        return
+    # figure out fields
+    msmd.open(ms)
+    scans = msmd.scannumbers()
+    fields = msmd.fieldsforscans(scans)
+    names = msmd.namesforfields(fields)
+    msmd.close()
 
-    logging.info(f'making image {outfits} with cell:{pix_sz}, size:{img_sz}')
+    # loop over fields and do ft for each
+    for name in names:
 
-    if overwrite and os.path.exists(outfits):
-        os.unlink(outfits)
+        outfits = f'{outpath}/{name}_{datacolumn}.fits'
 
-    tclean(vis=ms, imagename=tmpimage,
-           cell=f'{pix_sz}arcsec', imsize=[img_sz, img_sz],
-           niter=niter, cycleniter=cycleniter, nsigma=nsigma,
-           gain=0.2, deconvolver='multiscale', scales=[0, int(res_pix), int(4*res_pix)],
-           interactive=False,
-           datacolumn=datacolumn)
-    exportfits(imagename=f'{tmpimage}.image',
-               fitsimage=outfits)
+        # return if any fits already made, avoid subtraction issues
+        if not overwrite and os.path.exists(outfits):
+            logging.info(f'image {outfits} exists')
+            return
 
-    # subtract model from data
-    if subtract:
-        logging.info(f'model subtracted from visibilities in {ms}')
-        # clear CORRECTED column, it will be filled from DATA each time
-        tb.open(ms, nomodify=False)
-        if 'CORRECTED_DATA' in tb.colnames():
-            tb.removecols("CORRECTED_DATA")
-        tb.close()
-        # ft uses model (Jy/pix), not image (Jy/beam)
-        ft(vis=ms, model=f'{tmpimage}.model',
-           usescratch=True, incremental=False)
-        uvsub(vis=ms)
+        logging.info(f'making image {outfits} with cell:{pix_sz}, size:{img_sz}')
 
-    os.system(f'rm -rf {tmpimage}*')
+        if overwrite and os.path.exists(outfits):
+            os.unlink(outfits)
+
+        tclean(vis=ms, imagename=tmpimage, field=name,
+               cell=f'{pix_sz}arcsec', imsize=[img_sz, img_sz],
+               niter=niter, cycleniter=cycleniter, nsigma=nsigma,
+               gain=0.2, deconvolver='multiscale', scales=[0, int(res_pix), int(4*res_pix)],
+               interactive=False,
+               datacolumn=datacolumn)
+        exportfits(imagename=f'{tmpimage}.image',
+                   fitsimage=outfits)
+
+        # subtract model from data
+        if subtract:
+            logging.info(f'model subtracted from visibilities in {ms}')
+            # clear CORRECTED column, it will be filled from DATA each time
+            tb.open(ms, nomodify=False)
+            if 'CORRECTED_DATA' in tb.colnames():
+                tb.removecols("CORRECTED_DATA")
+            tb.close()
+            # ft uses model (Jy/pix), not image (Jy/beam)
+            ft(vis=ms, model=f'{tmpimage}.model', field=name,
+               usescratch=True, incremental=False)
+
+        os.system(f'rm -rf {tmpimage}*')
+
+    # now subtract all fields
+    uvsub(vis=ms)
 
 
 def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
@@ -546,7 +586,8 @@ class AlmaVar:
         if outdir:
             outdir = os.path.expanduser(outdir.rstrip('/'))
         if ms_in:
-            self.ms_in = os.path.expanduser(ms_in.rstrip('/'))
+            ms_in = os.path.expanduser(ms_in.rstrip('/'))
+            self.ms_in = os.path.abspath(ms_in)
             self.ms_in_name = os.path.basename(self.ms_in)
             if outdir is None:
                 outdir = os.path.dirname(ms_in)
@@ -555,7 +596,8 @@ class AlmaVar:
         else:
             if '.avg' not in ms_avg:
                 logging.warning(f'ms_avg should end in ".avg"')
-            self.ms_avg = os.path.expanduser(ms_avg.rstrip('/'))
+            ms_avg = os.path.expanduser(ms_avg.rstrip('/'))
+            self.ms_avg = os.path.abspath(ms_avg)
             self.wdir = os.path.dirname(f'{self.ms_avg}/../')
 
         self.scandir = f'{self.wdir}/scans'
@@ -674,11 +716,9 @@ class AlmaVar:
 
         # make images and subtract continuum model
         if clean:
-            avg_clean = f'{self.wdir}/ms_avg.raw.fits'
-            clean_image(self.ms_avg, avg_clean, 'data', subtract=True)
-            avg_clean_sub = f'{self.wdir}/ms_avg.sub.fits'
-            if subtract and not os.path.exists(avg_clean_sub):
-                clean_image(f'{self.ms_avg}', avg_clean_sub, 'corrected')
+            clean_image(self.ms_avg, 'data', self.wdir, subtract=True)
+            if subtract:
+                clean_image(f'{self.ms_avg}', 'corrected', outpath=self.wdir)
 
         # now fill some info for averaged ms
         ms.open(self.ms_avg)
@@ -844,7 +884,7 @@ class AlmaVar:
                 if np.max(_[0]) > mx:
                     mx = np.max(_[0])
             ax[0].set_ylim(0.5, 2*mx)
-            ax[0].set_ylabel('density')
+            ax[0].set_ylabel('number')
             fig.tight_layout()
             fig.savefig(f"{outpath}/{self.scan_info[scan]['scan_str']}_vis_snr.png")
             plt.close(fig)
@@ -881,16 +921,8 @@ class AlmaVar:
                 logging.info(f'skipping scan {scan}, no baselines')
                 continue
 
-            outfits = (f"{self.scan_info[scan]['scan_dir']}/"
-                       f"{self.scan_info[scan]['scan_str']}.fits")
-
-            if not overwrite and os.path.exists(outfits):
-                continue
-
-            if overwrite and os.path.exists(outfits):
-                os.unlink(outfits)
-
-            clean_image(self.scan_info[scan]['scan_avg_ms'], outfits, 'data', niter=0)
+            clean_image(self.scan_info[scan]['scan_avg_ms'], 'data',
+                        outpath=self.scan_info[scan]['scan_dir'], overwrite=overwrite, niter=0)
 
     def link_to_field(self, file, scan):
         """Symlink a file in a field directory."""
@@ -962,7 +994,8 @@ class AlmaVar:
 
             # plot with sources
             fits = (f"{self.scan_info[scan]['scan_dir']}/"
-                    f"{self.scan_info[scan]['scan_str']}.fits")
+                    f"{self.scan_info[scan]['field_name']}_data.fits")
+            print(fits)
             if os.path.exists(fits):
                 plot_fits_sources(fits,
                                   self.field_gaia[field]['table']['ra_ep'],
