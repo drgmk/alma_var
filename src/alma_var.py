@@ -490,7 +490,7 @@ def clean_image(ms, datacolumn, outpath=None,
 
         # subtract model from data
         if subtract:
-            logging.info(f'model subtracted from visibilities in {ms}')
+            logging.info(f'model {name} subtracted from visibilities in {ms}')
             # clear CORRECTED column, it will be filled from DATA each time
             tb.open(ms, nomodify=False)
             if 'CORRECTED_DATA' in tb.colnames():
@@ -503,6 +503,7 @@ def clean_image(ms, datacolumn, outpath=None,
         os.system(f'rm -rf {tmpimage}*')
 
     # now subtract all fields
+    logging.info(f'all models subtracted from visibilities in {ms}')
     uvsub(vis=ms)
 
 
