@@ -186,6 +186,7 @@ def export_ms(msfilename, xcor=True, acor=False):
     data_uu = uu[:, xc]
     data_vv = vv[:, xc]
     data_wgts = np.reshape(np.repeat(wgts[xc], uu.shape[0]), data_uu.shape)
+    time = np.tile(time, data_uu.shape[0]).reshape(data_uu.shape[0], -1)
 
     # Select only data that is NOT flagged, this step has the unexpected
     # effect of flattening the arrays to 1d
