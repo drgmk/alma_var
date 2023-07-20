@@ -196,7 +196,7 @@ def export_ms(msfilename, xcor=True, acor=False):
     data_wgts = data_wgts[np.logical_not(flags)]
     data_uu = data_uu[np.logical_not(flags)]
     data_vv = data_vv[np.logical_not(flags)]
-    time = time[np.logical_not(flags[0])]
+    time = time[np.logical_not(flags)]
     # scan = scan[np.logical_not(flags[0])]
 
     time /= (24*60*60)  # to MJD
