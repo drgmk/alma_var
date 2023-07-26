@@ -32,7 +32,7 @@ except NameError:
     import casatools.ms
     import casatools.msmetadata
     import casatools.table
-    from casatasks import listobs, uvmodelfit, tclean, split, exportfits, ft, uvsub
+    from casatasks import listobs, uvmodelfit, tclean, split, exportfits, ft, uvsub, importfits
 
     ms = casatools.ms()
     msmd = casatools.msmetadata()
@@ -46,20 +46,22 @@ except NameError:
     logging.getLogger('astropy').setLevel(logging.WARNING)
 
 
-def parallel_ms_in(ms_in, outdir):
+def parallel_ms_in(ms_in, fits_in, outdir):
     """Helper to run multiprocessing, use with pool.starmap.
 
     Run with commands like:
     import alma_var
     import glob
+    import os
     import multiprocessing
-    fs = glob.glob('/path/to/ms*')
-    outdir = '/path/to/outdir
-    listoftuples = [(f, outdir) for f in fs]
-    with multiprocessing.Pool() as pool:
-        pool.starmap(alma_var.parallel, listoftuples)
+    fs = glob.glob('/Users/grant/astro/data/alma/arks/*/visibilities/*fav.cor*ms')
+    fits = [glob.glob(f'{os.path.dirname(f)}/../images/*fits')[0] for f in fs]
+    outdir = './'
+    listoftuples = [(f, ff, outdir) for f,ff in zip(fs,fits)]
+    with multiprocessing.Pool(4) as pool:
+        pool.starmap(alma_var.parallel_ms_in, listoftuples)
     """
-    av = AlmaVar(ms_in=ms_in, outdir=outdir, log_level='INFO')
+    av = AlmaVar(ms_in=ms_in, clean_comp_fits=fits_in, outdir=outdir, log_level='INFO')
     av.process()
 
 
@@ -78,7 +80,7 @@ def parallel_ms_avg(ms_avg):
     av.process()
 
 
-def export_ms(msfilename, xcor=True, acor=False):
+def export_ms(msfilename, xcor=True, acor=False, reweight=True):
     """Direct copy of Luca Matra's export.
     https://github.com/dlmatra/miao
     """
@@ -178,6 +180,7 @@ def export_ms(msfilename, xcor=True, acor=False):
 
     # Select data
     time = time[xc]
+    spws = spwid[xc]
     # scan = scan[xc]
     data_real = Re[:, xc]
     data_imag = Im[:, xc]
@@ -187,6 +190,7 @@ def export_ms(msfilename, xcor=True, acor=False):
     data_vv = vv[:, xc]
     data_wgts = np.reshape(np.repeat(wgts[xc], uu.shape[0]), data_uu.shape)
     time = np.tile(time, data_uu.shape[0]).reshape(data_uu.shape[0], -1)
+    spws = np.tile(spws, data_uu.shape[0]).reshape(data_uu.shape[0], -1)
 
     # Select only data that is NOT flagged, this step has the unexpected
     # effect of flattening the arrays to 1d
@@ -197,6 +201,7 @@ def export_ms(msfilename, xcor=True, acor=False):
     data_uu = data_uu[np.logical_not(flags)]
     data_vv = data_vv[np.logical_not(flags)]
     time = time[np.logical_not(flags)]
+    spws = spws[np.logical_not(flags)]
     # scan = scan[np.logical_not(flags[0])]
 
     time /= (24*60*60)  # to MJD
@@ -209,13 +214,26 @@ def export_ms(msfilename, xcor=True, acor=False):
     vis = vis[srt]
     data_wgts = data_wgts[srt]
     time = time[srt]
+    spws = spws[srt]
 
     # re-weighting as suggested by Loomis+
-    wgt_mean = np.mean(data_wgts)
-    data_std = np.std(vis)
-    rew = (1/data_std**2)/wgt_mean
-    logging.info(f're-weighting value (1dof): {rew}')
-    data_wgts *= rew
+    if reweight:
+        spw_u = np.unique(spws)
+        for s in spw_u:
+            ok = spws == s
+            wgt_mean = np.mean(data_wgts[ok])
+            data_std = np.std(vis[ok])
+            rew = (1/data_std**2)/wgt_mean
+            logging.info(f're-weighting spw {s}: mean:{wgt_mean}, std:{data_std}')
+            logging.info(f're-weighting spw {s} value (1dof): {rew}')
+            data_wgts[ok] *= rew
+
+        # wgt_mean = np.mean(data_wgts)
+        # data_std = np.std(vis)
+        # rew = (1/data_std**2)/wgt_mean
+        # logging.info(f're-weighting: mean:{wgt_mean}, std:{data_std}')
+        # logging.info(f're-weighting value (1dof): {rew}')
+        # data_wgts *= rew
 
     return data_uu, data_vv, vis, data_wgts, time
 
@@ -329,6 +347,7 @@ def plot_fits_sources(fits, ra, dec):
     fig.set_title(fits.replace('.fits', ''))
     fig.savefig(fits.replace('.fits', '.png'))
     fig.close()
+    h.close()
 
 
 def get_ms_info(msfilepath):
@@ -406,7 +425,7 @@ def get_ms_info(msfilepath):
 
 
 def clean_image(ms, datacolumn, outpath=None,
-                niter=50000, cycleniter=500, nsigma=3,
+                niter=50000, cycleniter=500, nsigma=2.5,
                 oversample=3, pb_factor=1.6,
                 overwrite=False, tmpimage=None,
                 subtract=False):
@@ -505,7 +524,39 @@ def clean_image(ms, datacolumn, outpath=None,
 
     # now subtract all fields
     logging.info(f'all models subtracted from visibilities in {ms}')
+    if subtract:
+        uvsub(vis=ms)
+
+
+def subtract_fits_model(ms, fits):
+    """Subtract a FITS image model from an ms.
+
+    Parameters
+    ms : str
+        Path to ms file.
+    fits : str
+        Path to FITS image.
+    """
+    # clear CORRECTED column, it will be filled from DATA each time
+    tb.open(ms, nomodify=False)
+    if 'CORRECTED_DATA' in tb.colnames():
+        tb.removecols("CORRECTED_DATA")
+    tb.close()
+
+    # ft uses model (Jy/pix), not image (Jy/beam)
+    # invent a beam size to supress warnings
+    with astropy.io.fits.open(fits) as h:
+        aspp = np.abs(h[0].header['CDELT1']) * 3600
+    tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,10000))}'
+    importfits(fitsimage=fits, imagename=f'{tmpimage}',
+               beam=[f'{aspp:.3f}arcsec', f'{aspp:.3f}arcsec', '0deg'])
+    ft(vis=ms, model=f'{tmpimage}',
+       usescratch=True, incremental=False)
+    os.system(f'rm -rf {tmpimage}')
+
+    # now subtract
     uvsub(vis=ms)
+    logging.info(f'model subtracted from visibilities in {ms}')
 
 
 def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
@@ -560,6 +611,7 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
 class AlmaVar:
 
     def __init__(self, ms_in=None, ms_avg=None, outdir=None,
+                 clean_comp_fits=None,
                  det_snr=4, pb_factor=1.6, auto_load=False,
                  log_level='WARNING'):
         """Initialise by creating output folder and averaging ms.
@@ -633,6 +685,7 @@ class AlmaVar:
             tb.close()
 
         # some things (that might get filled later)
+        self.clean_comp_fits = clean_comp_fits
         self.pb_factor = pb_factor
         self.det_snr = det_snr
         self.field_gaia = {}
@@ -652,9 +705,11 @@ class AlmaVar:
         self.diagnostics()
         self.summed_filter()
         self.gaia_matched_filter(min_plx_mas=1)
+        logging.info(f'finished {self.wdir}')
 
     def avg_ms_in(self, nchan_spw=1, intent='OBSERVE_TARGET#ON_SOURCE',
-                  spw_include=None, clean=True, subtract=True):
+                  clean=True, subtract=True,
+                  tdm=True, fdm=True, sqld=False, chavg=False):
         """Average ms_in down to fewer channels per spw.
 
         The resulting ms has the averaged visibilities in DATA, and if
@@ -677,10 +732,6 @@ class AlmaVar:
             Subtract a model of the averaged ms. Requires clean=True.
         """
 
-        if spw_include is None:
-            spw_include = {'tfdm': True,
-                           'sqld': False, 'chavg': False}
-
         # skips ms_in related stuff if ms_avg exists already
         if not os.path.exists(self.ms_avg):
             logging.info('averaging input ms')
@@ -689,13 +740,15 @@ class AlmaVar:
             # TDM/FDM corresponds to FULL_RES (not SQLD or CH_AVG)
             # but we allow for various choices anyway
             msmd.open(self.ms_in)
-            spws = {}
-            if spw_include['tfdm']:
-                spws['tfdm'] = msmd.almaspws(tdm=True, fdm=True)
-            if spw_include['sqld']:
-                spws['sqld'] = msmd.almaspws(sqld=True)
-            if spw_include['chavg']:
-                spws['chavg'] = msmd.almaspws(chavg=True)
+            spws = np.array([])
+            if fdm:
+                spws = np.append(spws, msmd.almaspws(fdm=True))
+            if tdm:
+                spws = np.append(spws, msmd.almaspws(tdm=True))
+            if sqld:
+                spws = np.append(spws, msmd.almaspws(sqld=True))
+            if chavg:
+                spws = np.append(spws, msmd.almaspws(chavg=True))
             logging.info(f'spws: {spws}')
             msmd.close()
 
@@ -705,7 +758,7 @@ class AlmaVar:
             avg_list = []
             for k in self.ms_in_spw_info.keys():
                 spwid = self.ms_in_spw_info[k]['SpectralWindowId']
-                if spwid in spws['tfdm']:
+                if spwid in spws:
                     spw_list.append(spwid)
                     avg_list.append(self.ms_in_spw_info[k]['NumChan']//nchan_spw)
 
@@ -718,9 +771,14 @@ class AlmaVar:
 
         # make images and subtract continuum model
         if clean:
-            clean_image(self.ms_avg, 'data', self.wdir, subtract=True)
-            if subtract:
-                clean_image(f'{self.ms_avg}', 'corrected', outpath=self.wdir)
+            if self.clean_comp_fits:
+                clean_image(self.ms_avg, 'data', niter=0)
+                subtract_fits_model(self.ms_avg, self.clean_comp_fits)
+                clean_image(self.ms_avg, 'corrected', niter=0)
+            else:
+                clean_image(self.ms_avg, 'data', subtract=True)
+                if subtract:
+                    clean_image(f'{self.ms_avg}', 'corrected', niter=0)
 
         # now fill some info for averaged ms
         ms.open(self.ms_avg)
@@ -730,15 +788,16 @@ class AlmaVar:
         # get spws in averaged data
         msmd.open(self.ms_avg)
         self.ms_avg_spws = {}
-        if spw_include['tfdm']:
-            self.ms_avg_spws['tfdm'] = msmd.almaspws(tdm=True, fdm=True)
-        if spw_include['sqld']:
+        if tdm or fdm:
+            self.ms_avg_spws['tfdm'] = msmd.almaspws(tdm=tdm, fdm=fdm)
+        if sqld:
             self.ms_avg_spws['sqld'] = msmd.almaspws(sqld=True)
-        if spw_include['chavg']:
+        if chavg:
             self.ms_avg_spws['chavg'] = msmd.almaspws(chavg=True)
         msmd.close()
 
-    def split_scans(self, scans=None, datacolumn='CORRECTED', keep_scan_ms=False, load_scan_vis=False):
+    def split_scans(self, scans=None, datacolumn='CORRECTED',
+                    keep_scan_ms=False, load_scan_vis=False):
         """Split scans from averaged ms.
 
         Parameters
@@ -893,12 +952,14 @@ class AlmaVar:
 
             # look at raw and summed data
             tplot1 = (time-np.min(time))*24*60
-            fig, ax = plt.subplots(2, sharex=True, figsize=(8, 4))
+            fig, ax = plt.subplots(3, sharex=True, figsize=(8, 6))
             ax[0].plot(tplot1, vis.real, '.', label='Real', markersize=0.3)
             ax[1].plot(tplot1, vis.imag, '.', label='Imag', markersize=0.3)
-            ax[1].set_xlabel('Time / minutes')
+            ax[2].plot(tplot1, wt, '.', label='Weight', markersize=0.3)
+            ax[2].set_xlabel('Time / minutes')
             ax[0].set_ylabel('Real')
             ax[1].set_ylabel('Imag')
+            ax[2].set_ylabel('Weight')
             fig.tight_layout()
             fig.savefig(f"{outpath}/{self.scan_info[scan]['scan_str']}_rawvis_time.png")
             plt.close(fig)
@@ -997,7 +1058,7 @@ class AlmaVar:
             # plot with sources
             fits = (f"{self.scan_info[scan]['scan_dir']}/"
                     f"{self.scan_info[scan]['field_name']}_data.fits")
-            print(fits)
+
             if os.path.exists(fits):
                 plot_fits_sources(fits,
                                   self.field_gaia[field]['table']['ra_ep'],
@@ -1026,7 +1087,8 @@ class AlmaVar:
                     show_sig=True, ylab='$|Sum(V.w)|$',
                     outdir='.', outpre='', outfile=f'vis_time_smooth.png'):
         """Diagnostic plot for time series, return True for detection."""
-        tplot2 = (times-np.min(times))*24*60
+        t0 = np.min(times)
+        tplot2 = (times-t0)*24*60
         dt = np.median(np.diff(times))*24*60*60  # dt in seconds
         nw = 60
         if len(times)/2 < nw:
@@ -1037,20 +1099,25 @@ class AlmaVar:
         pk = []
         snr = []
 
+        # find outliers, empirically or assuming SNR is properly distributed
         vmin = 1e5
         for i, wi in enumerate(ws):
             conv = np.convolve(v_in, np.repeat(1, wi)/wi, mode='valid')
-            conv = (conv-np.mean(conv))*np.sqrt(wi) + np.mean(conv)
-            T[i, (wi-1)//2:len(v_in)-wi//2] = conv
 
-            # find significant +ve outliers
-            clipped, _, _ = scipy.stats.sigmaclip(conv)
-            mn, std = np.mean(clipped), np.std(clipped)
-            ok = np.where(T[i] > mn + det_snr*std)[0]
+            if ylab == 'SNR':
+                T[i, (wi-1)//2:len(v_in)-wi//2] = conv * np.sqrt(wi)
+
+            else:
+                clipped, _, _ = scipy.stats.sigmaclip(conv, low=3, high=3)
+                mn, std = np.mean(clipped), np.std(clipped)
+                conv = (conv-mn) / std
+                T[i, (wi-1)//2:len(v_in)-wi//2] = conv
+
+            ok = np.where(T[i] > det_snr)[0]
             for o in ok:
                 wpk.append(wi)
                 pk.append(tplot2[o])
-                snr.append((T[i, o]-mn)/std)
+                snr.append(T[i, o])
 
             if np.min(conv) < vmin:
                 vmin = np.min(conv)
@@ -1073,8 +1140,9 @@ class AlmaVar:
                          linewidth=5, alpha=0.2, color='grey',
                          label='suspect')
             ax[1].legend()
-        ax[1].plot(tplot2, v_in, '.', label='$|Sum(V.w)|$')
-        ax[1].set_xlabel('Time / minutes')
+        ax[1].plot(tplot2, v_in, '.', label=ylab)
+        t0_str = astropy.time.Time(t0, format='mjd').iso
+        ax[1].set_xlabel(f'Time - {t0_str} / minutes')
         ax[1].set_ylabel(ylab)
         ax[0].set_ylabel(f'smoothing width / $\Delta t$={dt:3.2f} seconds')
         fig.tight_layout()
