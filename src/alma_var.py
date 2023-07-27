@@ -553,6 +553,7 @@ def subtract_fits_model(ms, fits):
     ft(vis=ms, model=f'{tmpimage}',
        usescratch=True, incremental=False)
     os.system(f'rm -rf {tmpimage}')
+    h.close()
 
     # now subtract
     uvsub(vis=ms)
@@ -1222,6 +1223,7 @@ class AlmaVar:
                                 outdir=f'{outpath}', outfile=f'{outpre}_sum.png')
 
     def matchedfilter_search(self, scan, det_snr, ra_off=None, dec_off=None,
+                             save_flux=True,
                              reloutdir='matchf', outpre=''):
         """Run matched filter search on saved set of visibilities.
 
@@ -1238,6 +1240,8 @@ class AlmaVar:
             SNR threshold for detection flagging.
         ra_off, dec_off : numpy array, list, tuple
             Coordinates for search in radians
+        save_flux : bool
+            Save time/flux arrays.
         reloutdir : str
             Relative location from savefile in which to put output plots.
         outpre : str, optional
@@ -1256,16 +1260,23 @@ class AlmaVar:
         dec = np.array(dec_off).flatten()
 
         times = np.unique(time)
-        v_pos = []
+        snr = []
+        flux = []
 
         for t in times:
 
             ok = time == t
             vis_mod = ptsrc_vis(u[ok], v[ok], ra, dec)
-            h, _ = h_filter(vis_mod, wt[ok])
-            v_pos.append(np.sqrt(2) * np.real(np.dot(vis[ok], h.conj())))
+            h, norm = h_filter(vis_mod, wt[ok])
+            snr_ = np.sqrt(2) * np.real(np.dot(vis[ok], h.conj()))
+            snr.append(snr_)
+            flux.append(snr_ * norm)
 
-        v_pos = np.array(v_pos)
+        snr = np.array(snr)
+        flux = np.array(flux)
+        if save_flux:
+            np.save(self.scan_info[scan]['scan_avg_vis'].replace('-vis', '-time_flux'),
+                    np.array([times, flux, ra, dec], dtype=object))
 
         # plots
         outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
@@ -1274,7 +1285,7 @@ class AlmaVar:
         dets = []
         fns = []
         for i in range(len(ra)):
-            det, fn = self.smooth_plot(times, v_pos[:, i], det_snr, scan,
+            det, fn = self.smooth_plot(times, snr[:, i], det_snr, scan,
                                        outdir=outpath, outfile='.png', ylab='SNR',
                                        outpre=(f'{outpre}_{i:03d}_{np.rad2deg(ra[i])*3600:.3f}'
                                                f'_{np.rad2deg(dec[i])*3600:.3f}'))
