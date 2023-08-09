@@ -290,7 +290,7 @@ def ptsrc_vis(u, v, ra, dec, flatxy=False):
         rather than 2d [nuv, npt].
     """
     out = np.outer(u, -ra) + np.outer(v, dec)
-    arg = -2*np.pi*1j*out
+    arg = 2*np.pi*1j*out
     if NUMEXPR:
         a = numexpr.evaluate('exp(arg)')
     else:
@@ -645,7 +645,7 @@ class AlmaVar:
             self.ms_in = os.path.abspath(ms_in)
             self.ms_in_name = os.path.basename(self.ms_in)
             if outdir is None:
-                outdir = os.path.dirname(ms_in)
+                outdir = os.path.dirname(self.ms_in)
             self.wdir = f'{outdir}/{self.ms_in_name}.var'
             self.ms_avg = f'{self.wdir}/{self.ms_in_name}.avg'
         else:
@@ -673,7 +673,9 @@ class AlmaVar:
             os.mkdir(self.scandir)
 
         # only need info from ms_in if we are going to average it
-        if not os.path.exists(self.ms_avg):
+        if os.path.exists(self.ms_avg):
+            self.fill_ms_avg_info()
+        else:
             ms.open(self.ms_in)
             self.ms_in_spw_info = ms.getspectralwindowinfo()
             ms.close()
@@ -697,9 +699,9 @@ class AlmaVar:
         if auto_load:
             pass
 
-    def process(self):
+    def process(self, subtract=True):
         """Shortcut."""
-        self.avg_ms_in()
+        self.avg_ms_in(subtract=subtract)
         self.split_scans(keep_scan_ms=True)
         self.clean_images()
         self.split_scans(keep_scan_ms=False)  # delete ms files
@@ -723,10 +725,8 @@ class AlmaVar:
         intent : str or list of str, optional
             Intents to extract from input ms file, e.g. use
             'OBSERVE_TARGET#ON_SOURCE' to skip calibration scans.
-        spw_include : dict, optional
-            Dict of spw types to include, default is
-            {'tfdm': True, 'sqld': False, 'chavg': False}
-            and not really expected the others will be used.
+        tdm, fdm, sqld, chavg : bool, optional
+            Indicate which ALMA spws to include.
         clean : bool, optional
             Create clean images
         subtract : bool, optional
@@ -751,6 +751,12 @@ class AlmaVar:
             if chavg:
                 spws = np.append(spws, msmd.almaspws(chavg=True))
             logging.info(f'spws: {spws}')
+
+            # check any intents exist
+            if len(msmd.intents()) == 0:
+                logging.warning(f'no intents, keeping all scans')
+                intent = ''
+
             msmd.close()
 
             # average FULL_RES down to fewer channels per spw
@@ -774,27 +780,41 @@ class AlmaVar:
         if clean:
             if self.clean_comp_fits:
                 clean_image(self.ms_avg, 'data', niter=0)
-                subtract_fits_model(self.ms_avg, self.clean_comp_fits)
-                clean_image(self.ms_avg, 'corrected', niter=0)
+                if subtract:
+                    subtract_fits_model(self.ms_avg, self.clean_comp_fits)
+                    clean_image(self.ms_avg, 'corrected', niter=0)
             else:
-                clean_image(self.ms_avg, 'data', subtract=True)
+                clean_image(self.ms_avg, 'data', subtract=subtract)
                 if subtract:
                     clean_image(f'{self.ms_avg}', 'corrected', niter=0)
 
-        # now fill some info for averaged ms
+        # if not subtracting, MODEL_DATA is blank and we copy
+        # DATA to CORRECTED_DATA by running uvsub
+        if not subtract:
+            logging.info('no model subtraction, copying DATA to CORRECTED')
+            tb.open(self.ms_avg, nomodify=False)
+            tb.renamecol('DATA', 'CORRECTED_DATA')
+            tb.close()
+            clean_image(self.ms_avg, 'corrected', niter=0)
+
+        self.fill_ms_avg_info()
+
+    def fill_ms_avg_info(self):
+        """Fill some info for averaged ms."""
         ms.open(self.ms_avg)
         self.ms_avg_scan_info = ms.getscansummary()
         ms.close()
 
         # get spws in averaged data
-        msmd.open(self.ms_avg)
         self.ms_avg_spws = {}
-        if tdm or fdm:
-            self.ms_avg_spws['tfdm'] = msmd.almaspws(tdm=tdm, fdm=fdm)
-        if sqld:
-            self.ms_avg_spws['sqld'] = msmd.almaspws(sqld=True)
-        if chavg:
-            self.ms_avg_spws['chavg'] = msmd.almaspws(chavg=True)
+        tb.open(self.ms_avg)
+        self.ms_avg_spws['all'] = np.unique(tb.getcol('DATA_DESC_ID'))
+        tb.close()
+
+        msmd.open(self.ms_avg)
+        self.ms_avg_spws['tfdm'] = msmd.almaspws(tdm=True, fdm=True)
+        self.ms_avg_spws['sqld'] = msmd.almaspws(sqld=True)
+        self.ms_avg_spws['chavg'] = msmd.almaspws(chavg=True)
         msmd.close()
 
     def split_scans(self, scans=None, datacolumn='CORRECTED',
@@ -826,59 +846,47 @@ class AlmaVar:
             if not os.path.exists(scan_no_dir):
                 os.mkdir(scan_no_dir)
 
-            # process by spw type
-            for spw in self.ms_avg_spws.keys():
+            scan_str = f'scan_{int(scan_no):02d}'
 
-                if len(self.ms_avg_spws[spw]) == 0:
-                    continue
+            scan_avg_vis = f'{scan_no_dir}/{scan_str}-vis.npy'
+            scan_avg_info = scan_avg_vis.replace('-vis', '-info')
+            scan_avg_ms = f'{scan_no_dir}/{scan_str}.ms'
 
-                # T/FDM are named just for the scan, since this is what
-                # we assume will be used by default
-                if spw == 'tfdm':
-                    scan_str = f'scan_{int(scan_no):02d}'
-                else:
-                    scan_str = f'scan_{int(scan_no):02d}_{spw}'
-                scan_avg_vis = f'{scan_no_dir}/{scan_str}-vis.npy'
-                scan_avg_info = scan_avg_vis.replace('-vis', '-info')
-                scan_avg_ms = f'{scan_no_dir}/{scan_str}.ms'
+            if os.path.exists(scan_avg_vis) and not keep_scan_ms:
+                logging.info(f'loading scan {scan_no} from {scan_avg_vis}')
+                u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
+                self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
+            else:
+                logging.info(f'splitting scan {scan_no} from {scan_avg_ms} using {datacolumn}')
 
-                if os.path.exists(scan_avg_vis) and not keep_scan_ms:
-                    logging.info(f'loading scan {scan_no} from {scan_avg_vis}')
-                    u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
-                    self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
-                else:
-                    logging.info(f'splitting scan {scan_no} from {scan_avg_ms} using {datacolumn}')
+                if not os.path.exists(scan_avg_ms):
+                    split(vis=self.ms_avg, outputvis=scan_avg_ms,
+                          scan=scan_no, datacolumn=datacolumn, keepflags=False)
 
-                    if not os.path.exists(scan_avg_ms):
-                        split(vis=self.ms_avg, outputvis=scan_avg_ms,
-                              scan=scan_no, datacolumn=datacolumn, keepflags=False,
-                              spw=','.join([str(s) for s in self.ms_avg_spws[spw]]))
+                # get data from ms
+                u, v, vis, wt, time = export_ms(scan_avg_ms)
+                # save, this will make everything complex
+                np.save(scan_avg_vis, np.array([u, v, vis, wt, time]))
 
-                    # get data from ms
-                    u, v, vis, wt, time = export_ms(scan_avg_ms)
-                    # save, this will make everything complex
-                    np.save(scan_avg_vis, np.array([u, v, vis, wt, time]))
+                info = get_ms_info(scan_avg_ms)
+                info['nvis'] = len(vis)
+                info['scan_str'] = scan_str
+                info['scan_dir'] = scan_no_dir
+                info['scan_avg_ms'] = scan_avg_ms
+                info['scan_avg_vis'] = scan_avg_vis
+                if len(info['diams']) > 1:
+                    logging.warning(f'scan {scan_no} has antenna diams {info["diams"]}')
+                self.scan_info[scan_no] = info
+                np.save(scan_avg_info, info)
 
-                    info = get_ms_info(scan_avg_ms)
-                    info['nvis'] = len(vis)
-                    info['scan_str'] = scan_str
-                    info['scan_dir'] = scan_no_dir
-                    info['spw'] = spw
-                    info['scan_avg_ms'] = scan_avg_ms
-                    info['scan_avg_vis'] = scan_avg_vis
-                    if len(info['diams']) > 1:
-                        logging.warning(f'scan {scan_no} has antenna diams {info["diams"]}')
-                    self.scan_info[scan_no] = info
-                    np.save(scan_avg_info, info)
+            if load_scan_vis:
+                self.scan_vis[scan_str] = {'u': u, 'v': v, 'vis': vis, 'wt': wt, 'time': time}
 
-                if load_scan_vis:
-                    self.scan_vis[scan_str] = {'u': u, 'v': v, 'vis': vis, 'wt': wt, 'time': time}
+            if len(vis) == 0:
+                logging.info(f'{scan_no}: no visibilities')
 
-                if len(vis) == 0:
-                    logging.info(f'{scan_no}: no visibilities')
-
-                if not keep_scan_ms and os.path.exists(scan_avg_ms):
-                    shutil.rmtree(scan_avg_ms)
+            if not keep_scan_ms and os.path.exists(scan_avg_ms):
+                shutil.rmtree(scan_avg_ms)
 
     def diagnostics(self, scans=None, reloutdir='.',
                     pcrit=0.001):
@@ -922,14 +930,9 @@ class AlmaVar:
                     pvalue = pcrit
                 if pvalue <= pcrit:
                     self.scan_info[scan]['flagged_times'] = np.append(self.scan_info[scan]['flagged_times'], t)
-                    if 'OBSERVE_TARGET#ON_SOURCE' in self.scan_info[scan]['intent']:
-                        logging.warning(f'distribution non-normal with p {pvalue:.4f}%')
-                        logging.warning(f' in scan {scan} at time {t} (step {i}) with'
-                                        f" intent {self.scan_info[scan]['intent']}")
-                    else:
-                        logging.info(f'distribution non-normal with p {pvalue:.4f}%')
-                        logging.info(f' in scan {scan} at time {t} (step {i}) with'
-                                     f" intent {self.scan_info[scan]['intent']}")
+                    logging.warning(f'distribution non-normal with p {pvalue:.4f}%')
+                    logging.warning(f' in scan {scan} at time {t} (step {i}) with'
+                                    f" intent {self.scan_info[scan]['intent']}")
 
             # check visibility weights sensible
             # multiply by sqrt(2) assuming Re and Im independent
@@ -1295,7 +1298,7 @@ class AlmaVar:
         return dets, fns
 
     def uvmodelfit_search(self, msfilepath, ra_off=None, dec_off=None, dt=None,
-                          reloutdir='uvmfit', make_fits=False,
+                          reloutdir='uvmfit', make_fits=False, vary_pos=False,
                           cleanpar=None):
         """Run uvmodelfit search on a single-scan ms.
 
@@ -1311,6 +1314,8 @@ class AlmaVar:
             Relative location from savefile in which to put output plots.
         make_fits : bool, optional
             Make a series of FITS files with images
+        vary_pos : bool
+            Allow position to vary in fit.
         cleanpar : dict, optional
             Dict of args for tclean, need cell and imsize.
         """
@@ -1333,7 +1338,7 @@ class AlmaVar:
             make_fits_ = make_fits
             for ra, dec in zip(ra_off, dec_off):
                 self.uvmodelfit_search(msfilepath, ra, dec, dt=dt, reloutdir=reloutdir,
-                                       cleanpar=cleanpar, make_fits=make_fits_)
+                                       cleanpar=cleanpar, make_fits=make_fits_, vary_pos=vary_pos)
                 make_fits_ = False  # only first time around
             return
 
@@ -1357,39 +1362,35 @@ class AlmaVar:
         logging.info(f'running uv search for {os.path.basename(msfilepath)}')
 
         flux = []
-        time = []
+        ra = []
+        dec = []
 
-        out = listobs(msfilepath)
-
-        for k in out.keys():
-            if 'scan' in k:
-                if dt is None:
-                    dt = out[k]['0']['IntegrationTime']
-
-                t0 = out[k]['0']['BeginTime']
-                t1 = out[k]['0']['EndTime']
-                ts = np.arange(t0, t1, dt/(24*60*60))
+        tb.open(msfilepath)
+        times = tb.getcol("TIME") / (24*60*60)
+        tb.close()
+        time = np.unique(times)
+        dt = np.mean(np.diff(time))
 
         cleandir = f'{wdir}/cleans'
         if not os.path.exists(cleandir) and make_fits:
             os.mkdir(cleandir)
 
-        for i, t in enumerate(ts[:-1]):
+        for i, t in enumerate(time):
 
-            t0_ = mjd2date(t)
-            t1_ = mjd2date(ts[i+1])
+            t0_ = mjd2date(t-dt/2)
+            t1_ = mjd2date(t+dt/2)
             t0_str = t0_.strftime('%H:%M:%S') + t0_.strftime(".%f")[:2]
             t1_str = t1_.strftime('%H:%M:%S') + t1_.strftime(".%f")[:2]
-            tmid = (t + ts[i+1])/2
-            time.append(tmid)
 
             # uvmodelfit, flux is saved in cl as complex
             uvmodelfit(vis=msfilepath, timerange=f"{t0_str}~{t1_str}",
                        comptype='P',
-                       sourcepar=[1, ra_off, dec_off], varypar=[True, False, False],
+                       sourcepar=[1, ra_off, dec_off], varypar=[True, vary_pos, vary_pos],
                        outfile=cl)
             tb.open(cl)
             flux.append(np.real(tb.getcol('Flux')[0][0]))
+            ra.append(np.real(tb.getcol('Reference_Direction')[0][0]))
+            dec.append(np.real(tb.getcol('Reference_Direction')[1][0]))
             tb.close()
 
             if make_fits:
@@ -1401,19 +1402,36 @@ class AlmaVar:
                 tclean(vis=f'{msfilepath}', imagename=tmpimage,
                        **cleanpar, interactive=False, niter=0,
                        timerange=f"{t0_str}~{t1_str}")
-                exportfits(imagename=tmpimage,
+                exportfits(imagename=f'{tmpimage}.image',
                            fitsimage=f'{cleandir}/{i:04d}.fits')
 
-        tplot = (time-np.min(time))*24*60
+        t0 = np.min(time)
+        tplot = (time-t0)*24*60
 
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(tplot, flux, '.')
-        ax.set_xlabel('Time / minutes')
+        t0_str = astropy.time.Time(t0, format='mjd').iso
+        ax.set_xlabel(f'Time - {t0_str} / minutes')
         ax.set_ylabel('Flux / Jy')
         fig.savefig(f'{outdir}/{coords}_flux_time.png')
         plt.close(fig)
-        np.save(f'{outdir}/{coords}_timeflux.npy', np.vstack((time, flux)))
+        np.save(f'{outdir}/{coords}_timeflux.npy', np.vstack((time, flux, ra, dec)))
 
         shutil.rmtree(cl)
         if make_fits:
             os.system(f'rm -rf {tmpimage}*')
+
+    def get_timeseries(self):
+        """Get timeseries fluxes."""
+        time = np.array([])
+        flux = []
+        for s in self.scan_info.keys():
+            t, f, ra, dec = np.load(self.scan_info[s]['scan_avg_vis'].replace('-vis', '-time_flux'),
+                                    allow_pickle=True)
+            time = np.append(time, t)
+            flux.append(f)
+
+        flux = np.array(flux).reshape(-1, len(ra))
+        flux = np.rollaxis(flux, -1, 0)
+
+        return time, flux, ra, dec
