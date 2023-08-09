@@ -465,7 +465,7 @@ def clean_image(ms, datacolumn, outpath=None,
     outpath = os.path.expanduser(outpath.rstrip('/'))
 
     if tmpimage is None:
-        tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,10000))}'
+        tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,100000))}'
 
     # get a sensible looking image. pblimit is by default 0.2, but fwhm is 0.5,
     sizes = np.array([256, 320, 360, 384, 480, 500, 512, 1024, 2048])
@@ -547,7 +547,7 @@ def subtract_fits_model(ms, fits):
     # invent a beam size to supress warnings
     with astropy.io.fits.open(fits) as h:
         aspp = np.abs(h[0].header['CDELT1']) * 3600
-    tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,10000))}'
+    tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,100000))}'
     importfits(fitsimage=fits, imagename=f'{tmpimage}',
                beam=[f'{aspp:.3f}arcsec', f'{aspp:.3f}arcsec', '0deg'])
     ft(vis=ms, model=f'{tmpimage}',
@@ -1226,8 +1226,7 @@ class AlmaVar:
                                 outdir=f'{outpath}', outfile=f'{outpre}_sum.png')
 
     def matchedfilter_search(self, scan, det_snr, ra_off=None, dec_off=None,
-                             save_flux=True,
-                             reloutdir='matchf', outpre=''):
+                             save=True, reloutdir='matchf', outpre=''):
         """Run matched filter search on saved set of visibilities.
 
         Search runs over multiple sources at each time step.
@@ -1243,8 +1242,8 @@ class AlmaVar:
             SNR threshold for detection flagging.
         ra_off, dec_off : numpy array, list, tuple
             Coordinates for search in radians
-        save_flux : bool
-            Save time/flux arrays.
+        save : bool
+            Save time, snr, flux arrays.
         reloutdir : str
             Relative location from savefile in which to put output plots.
         outpre : str, optional
@@ -1277,9 +1276,9 @@ class AlmaVar:
 
         snr = np.array(snr)
         flux = np.array(flux)
-        if save_flux:
-            np.save(self.scan_info[scan]['scan_avg_vis'].replace('-vis', '-time_flux'),
-                    np.array([times, flux, ra, dec], dtype=object))
+        if save:
+            np.save(self.scan_info[scan]['scan_avg_vis'].replace('-vis', '-time_snr_flux'),
+                    np.array([times, flux, snr, ra, dec], dtype=object))
 
         # plots
         outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
@@ -1353,7 +1352,7 @@ class AlmaVar:
         wdir = outdir
         if not os.path.exists(wdir):
             os.mkdir(wdir)
-        cl = f'/tmp/{str(np.random.randint(0,10000))}.cl'
+        cl = f'/tmp/{str(np.random.randint(0,100000))}.cl'
         if os.path.exists(cl):
             shutil.rmtree(cl)
 
@@ -1397,7 +1396,7 @@ class AlmaVar:
                 if cleanpar is None:
                     cleanpar = {'cell': '0.5arcsec', 'imsize': [256, 256]}
 
-                tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,10000))}'
+                tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,100000))}'
                 os.system(f'rm -rf {tmpimage}')
                 tclean(vis=f'{msfilepath}', imagename=tmpimage,
                        **cleanpar, interactive=False, niter=0,
