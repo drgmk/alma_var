@@ -1092,6 +1092,9 @@ class AlmaVar:
                     show_sig=True, ylab='$|Sum(V.w)|$',
                     outdir='.', outpre='', outfile=f'vis_time_smooth.png'):
         """Diagnostic plot for time series, return True for detection."""
+        if len(times) < 1:
+            return False, None
+
         t0 = np.min(times)
         tplot2 = (times-t0)*24*60
         dt = np.median(np.diff(times))*24*60*60  # dt in seconds
@@ -1182,9 +1185,6 @@ class AlmaVar:
 
         # unique returns sorted times
         times = np.unique(time)
-        if len(times) < 3:
-            logging.warning(f'scan {scan} has only {len(times)} unique times')
-            return False, None
 
         v_abs = []
         for t in times:
@@ -1266,9 +1266,6 @@ class AlmaVar:
         dec = np.array(dec_off).flatten()
 
         times = np.unique(time)
-        if len(times) < 3:
-            logging.warning(f'scan {scan} has only {len(times)} unique times')
-            return [False], [None]
 
         snr = []
         flux = []
@@ -1432,22 +1429,23 @@ class AlmaVar:
         data = {}
         t0 = 1e9
         for s in self.scan_info.keys():
-            time, flux, snr, ra, dec = np.load(self.scan_info[s]['scan_avg_vis'].replace('-vis', '-time_snr_flux'),
-                                               allow_pickle=True)
-            if np.min(time) < t0:
-                t0 = np.min(time)
-            for i in range(len(ra)):
-                targ = str(ra[i])+','+str(dec[i])
-                if targ in data.keys():
-                    data[targ] = {'coord': data[targ]['coord'],
-                                  'time': np.append(data[targ]['time'], time),
-                                  'flux': np.append(data[targ]['flux'], flux[i]),
-                                  'snr': np.append(data[targ]['snr'], snr[i])}
-                else:
-                    data[targ] = {'coord': f'{ra[i]:.3f},{dec[i]:.3f}',
-                                  'time': time,
-                                  'flux': flux[i],
-                                  'snr': snr[i]}
+            file = self.scan_info[s]['scan_avg_vis'].replace('-vis', '-time_snr_flux')
+            if os.path.exists(file):
+                time, flux, snr, ra, dec = np.load(file, allow_pickle=True)
+                if np.min(time) < t0:
+                    t0 = np.min(time)
+                for i in range(len(ra)):
+                    targ = str(ra[i])+','+str(dec[i])
+                    if targ in data.keys():
+                        data[targ] = {'coord': data[targ]['coord'],
+                                      'time': np.append(data[targ]['time'], time),
+                                      'flux': np.append(data[targ]['flux'], flux[i]),
+                                      'snr': np.append(data[targ]['snr'], snr[i])}
+                    else:
+                        data[targ] = {'coord': f'{ra[i]:.3f},{dec[i]:.3f}',
+                                      'time': time,
+                                      'flux': flux[i],
+                                      'snr': snr[i]}
 
         if plot:
             fig, ax = plt.subplots(figsize=(8, 4))
