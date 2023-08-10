@@ -371,7 +371,7 @@ def get_ms_info(msfilepath):
     unique_diams = np.unique(diams)
     diams = diams * diam_unit
     if len(unique_diams) > 1:
-        logging.warning(f'more than one antenna diameter in {msfilepath}')
+        logging.warning(f'more than one antenna diameter in {msfilepath}: {unique_diams}')
     spws = np.array([], dtype=int)
     for obsid in obsids:
         tmp = msmd.spwsforscans(obsid=obsid)
@@ -460,8 +460,7 @@ def clean_image(ms, datacolumn, outpath=None,
     outpath = os.path.expanduser(outpath.rstrip('/'))
 
     if tmpimage is None:
-        rng = np.random.default_rng(os.ur)
-        tmpimage = f'/tmp/tmpimage{str(randint(0,100000))}'
+        tmpimage = f'/tmp/tmpimage{str(randint(100000))}'
 
     # get a sensible looking image. pblimit is by default 0.2, but fwhm is 0.5,
     sizes = np.array([256, 320, 360, 384, 480, 500, 512, 1024, 2048])
@@ -543,7 +542,7 @@ def subtract_fits_model(ms, fits):
     # invent a beam size to supress warnings
     with astropy.io.fits.open(fits) as h:
         aspp = np.abs(h[0].header['CDELT1']) * 3600
-    tmpimage = f'/tmp/tmpimage{str(randint(0,100000))}'
+    tmpimage = f'/tmp/tmpimage{str(randint(100000))}'
     importfits(fitsimage=fits, imagename=f'{tmpimage}',
                beam=[f'{aspp:.3f}arcsec', f'{aspp:.3f}arcsec', '0deg'])
     ft(vis=ms, model=f'{tmpimage}',
