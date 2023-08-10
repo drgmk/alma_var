@@ -1101,6 +1101,8 @@ class AlmaVar:
         nw = 60
         if len(times)/2 < nw:
             nw = len(times)//2
+        if nw == 0:
+            nw = 1
         ws = np.arange(nw)+1
         T = np.zeros((nw, len(times)))
         wpk = []
