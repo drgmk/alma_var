@@ -856,7 +856,7 @@ class AlmaVar:
             if os.path.exists(scan_avg_vis) and not keep_scan_ms:
                 logging.info(f'loading scan {scan_no} from {scan_avg_vis}')
                 u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
-                if len(np.unique(times)) <= 1:
+                if len(np.unique(time)) <= 1:
                     logging.warning(f'single time point for scan {scan_no}, skipping')
                     continue
                 self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
@@ -872,7 +872,7 @@ class AlmaVar:
                 # save, this will make everything complex
                 np.save(scan_avg_vis, np.array([u, v, vis, wt, time]))
 
-                if len(np.unique(times)) <= 1:
+                if len(np.unique(time)) <= 1:
                     logging.warning(f'single time point for scan {scan_no}, skipping')
                     continue
 
