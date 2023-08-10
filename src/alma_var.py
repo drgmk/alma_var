@@ -1436,7 +1436,7 @@ class AlmaVar:
     def timeseries_summary(self, plot=True):
         """Get and plot timeseries fluxes."""
         data = {}
-        t0 = 1e9
+        t0 = 1e6
         for s in self.scan_info.keys():
             file = self.scan_info[s]['scan_avg_vis'].replace('-vis', '-time_snr_flux')
             if os.path.exists(file):
