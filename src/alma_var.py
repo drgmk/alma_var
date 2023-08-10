@@ -1291,8 +1291,8 @@ class AlmaVar:
         snr = np.array(snr)
         flux = np.array(flux)
         if save:
-            np.save(self.scan_info[scan]['scan_avg_vis'].replace('-vis', '-time_snr_flux'),
-                    np.asarray((times, flux.T, snr.T, np.rad2deg(ra)*3600, np.rad2deg(dec)*3600), dtype=object))
+            np.savez(self.scan_info[scan]['scan_avg_vis'].replace('-vis.npy', '-time_snr_flux.npz'),
+                     times=times, flux=flux.T, snr=snr.T, ra=np.rad2deg(ra)*3600, dec=np.rad2deg(dec)*3600)
 
         # plots
         outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
@@ -1437,9 +1437,10 @@ class AlmaVar:
         data = {}
         t0 = 1e6
         for s in self.scan_info.keys():
-            file = self.scan_info[s]['scan_avg_vis'].replace('-vis', '-time_snr_flux')
+            file = self.scan_info[s]['scan_avg_vis'].replace('-vis.npy', '-time_snr_flux.npz')
             if os.path.exists(file):
-                time, flux, snr, ra, dec = np.load(file, allow_pickle=True)
+                fh = np.load(file)
+                time, flux, snr, ra, dec = fh['time'], fh['flux'], fh['snr'], fh['ra'], fh['dec']
                 if np.min(time) < t0:
                     t0 = np.min(time)
                 for i in range(len(ra)):
