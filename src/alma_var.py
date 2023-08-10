@@ -46,7 +46,7 @@ except NameError:
     logging.getLogger('astropy').setLevel(logging.WARNING)
 
 
-def parallel_ms_in(ms_in, fits_in, outdir):
+def parallel_ms_in(ms_in, outdir, fits_in=None):
     """Helper to run multiprocessing, use with pool.starmap.
 
     Run with commands like:
@@ -55,9 +55,9 @@ def parallel_ms_in(ms_in, fits_in, outdir):
     import os
     import multiprocessing
     fs = glob.glob('/Users/grant/astro/data/alma/arks/*/visibilities/*fav.cor*ms')
-    fits = [glob.glob(f'{os.path.dirname(f)}/../images/*fits')[0] for f in fs]
+    fits = [glob.glob(f'{os.path.dirname(f)}/../images/*model.fits')[0] for f in fs]
     outdir = './'
-    listoftuples = [(f, ff, outdir) for f,ff in zip(fs,fits)]
+    listoftuples = [(f, outdir, ff) for f,ff in zip(fs,fits)]
     with multiprocessing.Pool(4) as pool:
         pool.starmap(alma_var.parallel_ms_in, listoftuples)
     """
@@ -152,6 +152,8 @@ def export_ms(msfilename, xcor=True, acor=False, reweight=True):
         Re_yy = data[1,:,:].real
         Im_yy = data[1,:,:].imag
         weight_yy = weight[1,:]
+        weight_xx = np.tile(weight_xx, nchan).reshape(nchan, -1)
+        weight_yy = np.tile(weight_yy, nchan).reshape(nchan, -1)
 
         # Since we don't care about polarization, combine polarization states
         # (average them together) and fix the weights accordingly. Also if any
@@ -185,10 +187,9 @@ def export_ms(msfilename, xcor=True, acor=False, reweight=True):
     data_real = Re[:, xc]
     data_imag = Im[:, xc]
     flags = flags[:, xc]
-    # data_wgts = wgts[xc]
+    data_wgts = wgts[:, xc]
     data_uu = uu[:, xc]
     data_vv = vv[:, xc]
-    data_wgts = np.reshape(np.repeat(wgts[xc], uu.shape[0]), data_uu.shape)
     time = np.tile(time, data_uu.shape[0]).reshape(data_uu.shape[0], -1)
     spws = np.tile(spws, data_uu.shape[0]).reshape(data_uu.shape[0], -1)
 
@@ -217,6 +218,7 @@ def export_ms(msfilename, xcor=True, acor=False, reweight=True):
     spws = spws[srt]
 
     # re-weighting as suggested by Loomis+
+    # this assumes 1 d.o.f per visibility
     if reweight:
         spw_u = np.unique(spws)
         for s in spw_u:
@@ -227,13 +229,6 @@ def export_ms(msfilename, xcor=True, acor=False, reweight=True):
             logging.info(f're-weighting spw {s}: mean:{wgt_mean}, std:{data_std}')
             logging.info(f're-weighting spw {s} value (1dof): {rew}')
             data_wgts[ok] *= rew
-
-        # wgt_mean = np.mean(data_wgts)
-        # data_std = np.std(vis)
-        # rew = (1/data_std**2)/wgt_mean
-        # logging.info(f're-weighting: mean:{wgt_mean}, std:{data_std}')
-        # logging.info(f're-weighting value (1dof): {rew}')
-        # data_wgts *= rew
 
     return data_uu, data_vv, vis, data_wgts, time
 
@@ -552,7 +547,7 @@ def subtract_fits_model(ms, fits):
                beam=[f'{aspp:.3f}arcsec', f'{aspp:.3f}arcsec', '0deg'])
     ft(vis=ms, model=f'{tmpimage}',
        usescratch=True, incremental=False)
-    os.system(f'rm -rf {tmpimage}')
+    os.system(f'rm -rf {tmpimage}*')
     h.close()
 
     # now subtract
@@ -708,6 +703,7 @@ class AlmaVar:
         self.diagnostics()
         self.summed_filter()
         self.gaia_matched_filter(min_plx_mas=1)
+        self.timeseries_summary()
         logging.info(f'finished {self.wdir}')
 
     def avg_ms_in(self, nchan_spw=1, intent='OBSERVE_TARGET#ON_SOURCE',
@@ -999,7 +995,7 @@ class AlmaVar:
         if not os.path.exists(fdir):
             os.mkdir(fdir)
 
-        link = f'{fdir}/{scan:03d}_{os.path.basename(file)}'
+        link = f'{fdir}/{os.path.basename(file)}'
         link_rel = os.path.relpath(os.path.dirname(file), fdir)
         linked = f'{link_rel}/{os.path.basename(file)}'
         if not os.path.exists(link):
@@ -1278,7 +1274,8 @@ class AlmaVar:
         flux = np.array(flux)
         if save:
             np.save(self.scan_info[scan]['scan_avg_vis'].replace('-vis', '-time_snr_flux'),
-                    np.array([times, flux, snr, ra, dec], dtype=object))
+                    np.array([times, flux.T, snr.T,
+                              np.rad2deg(ra)*3600, np.rad2deg(dec)*3600], dtype=object))
 
         # plots
         outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
@@ -1397,7 +1394,7 @@ class AlmaVar:
                     cleanpar = {'cell': '0.5arcsec', 'imsize': [256, 256]}
 
                 tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,100000))}'
-                os.system(f'rm -rf {tmpimage}')
+                os.system(f'rm -rf {tmpimage}*')
                 tclean(vis=f'{msfilepath}', imagename=tmpimage,
                        **cleanpar, interactive=False, niter=0,
                        timerange=f"{t0_str}~{t1_str}")
@@ -1420,17 +1417,41 @@ class AlmaVar:
         if make_fits:
             os.system(f'rm -rf {tmpimage}*')
 
-    def get_timeseries(self):
-        """Get timeseries fluxes."""
-        time = np.array([])
-        flux = []
+    def timeseries_summary(self, plot=True):
+        """Get and plot timeseries fluxes."""
+        data = {}
+        t0 = 1e9
         for s in self.scan_info.keys():
-            t, f, ra, dec = np.load(self.scan_info[s]['scan_avg_vis'].replace('-vis', '-time_flux'),
-                                    allow_pickle=True)
-            time = np.append(time, t)
-            flux.append(f)
+            time, flux, snr, ra, dec = np.load(self.scan_info[s]['scan_avg_vis'].replace('-vis', '-time_snr_flux'),
+                                               allow_pickle=True)
+            if np.min(time) < t0:
+                t0 = np.min(time)
+            for i in range(len(ra)):
+                targ = str(ra[i])+','+str(dec[i])
+                if targ in data.keys():
+                    data[targ] = {'coord': data[targ]['coord'],
+                                  'time': np.append(data[targ]['time'], time),
+                                  'flux': np.append(data[targ]['flux'], flux[i]),
+                                  'snr': np.append(data[targ]['snr'], snr[i])}
+                else:
+                    data[targ] = {'coord': f'{ra[i]:.3f},{dec[i]:.3f}',
+                                  'time': time,
+                                  'flux': flux[i],
+                                  'snr': snr[i]}
 
-        flux = np.array(flux).reshape(-1, len(ra))
-        flux = np.rollaxis(flux, -1, 0)
+        if plot:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            for i, k in enumerate(data.keys()):
+                off = 8 * np.std(data[k]['flux'])
+                ax.text(np.min(data[k]['time']-t0), np.median(data[k]['flux'])+i*off, data[k]['coord'],
+                        alpha=0.5, horizontalalignment='left')
+                ax.plot(data[k]['time']-t0,
+                        np.ones(len(data[k]['time']))*np.median(data[k]['flux'])+i*off, alpha=0.5)
+                ax.scatter(data[k]['time']-t0, data[k]['flux'] + i*off, s=1)
+            t0_str = astropy.time.Time(t0, format='mjd').iso
+            ax.set_xlabel(f'time - {t0_str} / days')
+            ax.set_ylabel('flux + offset / Jy')
+            fig.tight_layout()
+            fig.savefig(f'{self.wdir}/timeseries.pdf')
 
-        return time, flux, ra, dec
+        return data
