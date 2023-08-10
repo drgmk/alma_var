@@ -856,6 +856,9 @@ class AlmaVar:
             if os.path.exists(scan_avg_vis) and not keep_scan_ms:
                 logging.info(f'loading scan {scan_no} from {scan_avg_vis}')
                 u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
+                if len(np.unique(times)) <= 1:
+                    logging.warning(f'single time point for scan {scan_no}, skipping')
+                    continue
                 self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
             else:
                 logging.info(f'splitting scan {scan_no} from {scan_avg_ms} using {datacolumn}')
@@ -868,6 +871,10 @@ class AlmaVar:
                 u, v, vis, wt, time = export_ms(scan_avg_ms)
                 # save, this will make everything complex
                 np.save(scan_avg_vis, np.array([u, v, vis, wt, time]))
+
+                if len(np.unique(times)) <= 1:
+                    logging.warning(f'single time point for scan {scan_no}, skipping')
+                    continue
 
                 info = get_ms_info(scan_avg_ms)
                 info['nvis'] = len(vis)
@@ -1139,7 +1146,7 @@ class AlmaVar:
         fig, ax = plt.subplots(2, figsize=(8, 6), sharex=True,
                                gridspec_kw={'height_ratios': [2, 1]})
         ax[0].imshow(T, aspect='auto', origin='lower', vmin=vmin,
-                     extent=(np.min(tplot2), np.max(tplot2),
+                     extent=(np.min(tplot2)*0.9, np.max(tplot2)*1.1,
                              np.min(ws)-0.5, np.max(ws)+0.5))
         if show_sig and len(snr) > 0:
             mx = np.argmax(snr)
