@@ -460,7 +460,8 @@ def clean_image(ms, datacolumn, outpath=None,
     outpath = os.path.expanduser(outpath.rstrip('/'))
 
     if tmpimage is None:
-        tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,100000))}'
+        rng = np.random.default_rng(os.ur)
+        tmpimage = f'/tmp/tmpimage{str(randint(0,100000))}'
 
     # get a sensible looking image. pblimit is by default 0.2, but fwhm is 0.5,
     sizes = np.array([256, 320, 360, 384, 480, 500, 512, 1024, 2048])
@@ -542,7 +543,7 @@ def subtract_fits_model(ms, fits):
     # invent a beam size to supress warnings
     with astropy.io.fits.open(fits) as h:
         aspp = np.abs(h[0].header['CDELT1']) * 3600
-    tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,100000))}'
+    tmpimage = f'/tmp/tmpimage{str(randint(0,100000))}'
     importfits(fitsimage=fits, imagename=f'{tmpimage}',
                beam=[f'{aspp:.3f}arcsec', f'{aspp:.3f}arcsec', '0deg'])
     ft(vis=ms, model=f'{tmpimage}',
@@ -602,6 +603,11 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     ra_off *= np.cos(dec.to(un.rad).value)
 
     return ra_off, dec_off, r
+
+
+def randint(n):
+    seed = int.from_bytes(os.urandom(10), byteorder='big')
+    return np.random.default_rng(seed).integers(n)
 
 
 class AlmaVar:
@@ -1349,7 +1355,7 @@ class AlmaVar:
         wdir = outdir
         if not os.path.exists(wdir):
             os.mkdir(wdir)
-        cl = f'/tmp/{str(np.random.randint(0,100000))}.cl'
+        cl = f'/tmp/{str(randint(100000))}.cl'
         if os.path.exists(cl):
             shutil.rmtree(cl)
 
@@ -1393,13 +1399,13 @@ class AlmaVar:
                 if cleanpar is None:
                     cleanpar = {'cell': '0.5arcsec', 'imsize': [256, 256]}
 
-                tmpimage = f'/tmp/tmpimage{str(np.random.randint(0,100000))}'
-                os.system(f'rm -rf {tmpimage}*')
+                tmpimage = f'/tmp/tmpimage{str(randint(100000))}'
                 tclean(vis=f'{msfilepath}', imagename=tmpimage,
                        **cleanpar, interactive=False, niter=0,
                        timerange=f"{t0_str}~{t1_str}")
                 exportfits(imagename=f'{tmpimage}.image',
                            fitsimage=f'{cleandir}/{i:04d}.fits')
+                os.system(f'rm -rf {tmpimage}*')
 
         t0 = np.min(time)
         tplot = (time-t0)*24*60
@@ -1414,8 +1420,6 @@ class AlmaVar:
         np.save(f'{outdir}/{coords}_timeflux.npy', np.vstack((time, flux, ra, dec)))
 
         shutil.rmtree(cl)
-        if make_fits:
-            os.system(f'rm -rf {tmpimage}*')
 
     def timeseries_summary(self, plot=True):
         """Get and plot timeseries fluxes."""
