@@ -2,5 +2,5 @@
 name = "alma_var"
 version = "0.0.1"
 dependencies = [
-    "numpy", "scipy", "matplotlib"
+    "numpy", "scipy", "matplotlib", "astropy>=5.2", "aplpy", "astroquery", "numexpr"
 ]

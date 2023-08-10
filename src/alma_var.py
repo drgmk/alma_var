@@ -1182,6 +1182,9 @@ class AlmaVar:
 
         # unique returns sorted times
         times = np.unique(time)
+        if len(times) < 3:
+            logging.warning(f'scan {scan} has only {len(times)} unique times')
+            return False, None
 
         v_abs = []
         for t in times:
@@ -1263,6 +1266,10 @@ class AlmaVar:
         dec = np.array(dec_off).flatten()
 
         times = np.unique(time)
+        if len(times) < 3:
+            logging.warning(f'scan {scan} has only {len(times)} unique times')
+            return [False], [None]
+
         snr = []
         flux = []
 
