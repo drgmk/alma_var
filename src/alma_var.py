@@ -1292,7 +1292,7 @@ class AlmaVar:
         flux = np.array(flux)
         if save:
             np.save(self.scan_info[scan]['scan_avg_vis'].replace('-vis', '-time_snr_flux'),
-                    (times, flux.T, snr.T, np.rad2deg(ra)*3600, np.rad2deg(dec)*3600), dtype=object)
+                    np.asarray((times, flux.T, snr.T, np.rad2deg(ra)*3600, np.rad2deg(dec)*3600), dtype=object))
 
         # plots
         outpath = f'{os.path.dirname(savefile)}/{reloutdir}'
