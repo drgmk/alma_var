@@ -581,7 +581,6 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     r = Gaia.query_object_async(coordinate=coord, radius=radius)
     r = QTable(r)
     r.sort('dist')
-    logging.info(f'found {len(r)} sources for field {field}')
 
     if min_plx_mas:
         r = r[r['parallax'] > min_plx_mas * un.mas]
@@ -601,7 +600,6 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     dec_off = (dec_off + np.pi) % (2 * np.pi) - np.pi
     # RA offset is ra x cos(dec)
     ra_off *= np.cos(dec.to(un.rad).value)
-    logging.info(f'returning {len(r)} sources for field {field}')
 
     return ra_off, dec_off, r
 
@@ -859,7 +857,7 @@ class AlmaVar:
                 logging.info(f'loading scan {scan_no} from {scan_avg_vis}')
                 u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
                 if len(np.unique(time)) == 0:
-                    logging.warning(f'single time point for scan {scan_no}, skipping')
+                    logging.warning(f'no time points for scan {scan_no}, skipping')
                 else:
                     self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
             else:
@@ -885,7 +883,7 @@ class AlmaVar:
                 np.save(scan_avg_info, info)
 
                 if len(np.unique(time)) == 0:
-                    logging.warning(f'single time point for scan {scan_no}, skipping')
+                    logging.warning(f'no time points for scan {scan_no}, skipping')
                 else:
                     self.scan_info[scan_no] = info
 
@@ -1068,6 +1066,7 @@ class AlmaVar:
                 self.field_gaia[field]['ra_off'] = ra_off
                 self.field_gaia[field]['dec_off'] = dec_off
                 self.field_gaia[field]['table'] = r
+                logging.info(f'found {len(r)} sources for field {field}')
 
             # plot with sources
             fits = (f"{self.scan_info[scan]['scan_dir']}/"
