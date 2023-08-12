@@ -576,11 +576,12 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
         RA/Dec offsets of targets in radians, and full result table.
     """
     coord = SkyCoord(ra=ra, dec=dec, frame='icrs')
-    logging.info(f'get_gaia_offsets: search at {ra}, {dec}')
+    logging.info(f'get_gaia_offsets: search within {radius} at {ra}, {dec}')
 
     r = Gaia.query_object_async(coordinate=coord, radius=radius)
     r = QTable(r)
     r.sort('dist')
+    logging.info(f'found {len(r)} sources for field {field}')
 
     if min_plx_mas:
         r = r[r['parallax'] > min_plx_mas * un.mas]
@@ -600,6 +601,7 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     dec_off = (dec_off + np.pi) % (2 * np.pi) - np.pi
     # RA offset is ra x cos(dec)
     ra_off *= np.cos(dec.to(un.rad).value)
+    logging.info(f'returning {len(r)} sources for field {field}')
 
     return ra_off, dec_off, r
 
@@ -707,7 +709,7 @@ class AlmaVar:
         self.split_scans(keep_scan_ms=False)  # delete ms files
         self.diagnostics()
         self.summed_filter()
-        self.gaia_matched_filter(min_plx_mas=1)
+        self.gaia_matched_filter()
         self.timeseries_summary()
         logging.info(f'finished {self.wdir}')
 
@@ -856,10 +858,10 @@ class AlmaVar:
             if os.path.exists(scan_avg_vis) and not keep_scan_ms:
                 logging.info(f'loading scan {scan_no} from {scan_avg_vis}')
                 u, v, vis, wt, time = load_npy_vis(scan_avg_vis)
-                if len(np.unique(time)) <= 1:
+                if len(np.unique(time)) == 0:
                     logging.warning(f'single time point for scan {scan_no}, skipping')
-                    continue
-                self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
+                else:
+                    self.scan_info[scan_no] = np.load(scan_avg_info, allow_pickle=True).item()
             else:
                 logging.info(f'splitting scan {scan_no} from {scan_avg_ms} using {datacolumn}')
 
@@ -872,10 +874,6 @@ class AlmaVar:
                 # save, this will make everything complex
                 np.save(scan_avg_vis, np.array([u, v, vis, wt, time]))
 
-                if len(np.unique(time)) <= 1:
-                    logging.warning(f'single time point for scan {scan_no}, skipping')
-                    continue
-
                 info = get_ms_info(scan_avg_ms)
                 info['nvis'] = len(vis)
                 info['scan_str'] = scan_str
@@ -884,8 +882,12 @@ class AlmaVar:
                 info['scan_avg_vis'] = scan_avg_vis
                 if len(info['diams']) > 1:
                     logging.warning(f'scan {scan_no} has antenna diams {info["diams"]}')
-                self.scan_info[scan_no] = info
                 np.save(scan_avg_info, info)
+
+                if len(np.unique(time)) == 0:
+                    logging.warning(f'single time point for scan {scan_no}, skipping')
+                else:
+                    self.scan_info[scan_no] = info
 
             if load_scan_vis:
                 self.scan_vis[scan_str] = {'u': u, 'v': v, 'vis': vis, 'wt': wt, 'time': time}
@@ -1125,9 +1127,12 @@ class AlmaVar:
                 T[i, (wi-1)//2:len(v_in)-wi//2] = conv * np.sqrt(wi)
 
             else:
-                clipped, _, _ = scipy.stats.sigmaclip(conv, low=3, high=3)
-                mn, std = np.mean(clipped), np.std(clipped)
-                conv = (conv-mn) / std
+                if len(times) > 1:
+                    clipped, _, _ = scipy.stats.sigmaclip(conv, low=3, high=3)
+                    mn, std = np.mean(clipped), np.std(clipped)
+                    conv = (conv-mn) / std
+                else:
+                    conv = 1
                 T[i, (wi-1)//2:len(v_in)-wi//2] = conv
 
             ok = np.where(T[i] > det_snr)[0]
@@ -1146,7 +1151,7 @@ class AlmaVar:
         fig, ax = plt.subplots(2, figsize=(8, 6), sharex=True,
                                gridspec_kw={'height_ratios': [2, 1]})
         ax[0].imshow(T, aspect='auto', origin='lower', vmin=vmin,
-                     extent=(np.min(tplot2)*0.9, np.max(tplot2)*1.1,
+                     extent=(np.min(tplot2), np.max(tplot2),
                              np.min(ws)-0.5, np.max(ws)+0.5))
         if show_sig and len(snr) > 0:
             mx = np.argmax(snr)
