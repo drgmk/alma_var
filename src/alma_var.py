@@ -604,6 +604,24 @@ def get_gaia_offsets(ra, dec, radius, date, min_plx_mas=None):
     return ra_off, dec_off, r
 
 
+def tiled_offsets(radius, res):
+    """Return tiled offset points
+
+    Parameters
+    ----------
+    radius : astropy unit quantity
+        Radius to tile out to.
+    res : astropy unit quantity
+        Spatial resolution.
+    """
+    n = 2*radius.to(un.rad).value / res.to(un.rad).value
+    x = (np.arange(n) - n//2) * res.to(un.rad).value
+    xx, yy = np.meshgrid(x, x)
+    r = np.hypot(xx, yy)
+    ok = r <= radius.to(un.rad).value
+    return xx[ok], yy[ok]
+
+
 def randint(n):
     seed = int.from_bytes(os.urandom(10), byteorder='big')
     return np.random.default_rng(seed).integers(n)
@@ -691,7 +709,7 @@ class AlmaVar:
         self.clean_comp_fits = clean_comp_fits
         self.pb_factor = pb_factor
         self.det_snr = det_snr
-        self.field_gaia = {}
+        self.field_sources = {}
         self.scan_info = None
         self.scan_vis = None
 
@@ -707,7 +725,8 @@ class AlmaVar:
         self.split_scans(keep_scan_ms=False)  # delete ms files
         self.diagnostics()
         self.summed_filter()
-        self.gaia_matched_filter()
+        self.field_matched_filter()
+        self.plot_sources()
         self.timeseries_summary()
         logging.info(f'finished {self.wdir}')
 
@@ -1045,39 +1064,54 @@ class AlmaVar:
                     if det:
                         self.link_to_field(fn, scan)
 
-    def gaia_sources(self, scans=None, min_plx_mas=None, update=False):
+    def init_field_sources(self, update=False):
+        scans = [s for s in self.scan_info.keys()]
+        for scan in scans:
+            field = self.scan_info[scan]['field_id']
+            if field not in self.field_sources.keys() or update:
+                self.field_sources[field] = {}
+                self.field_sources[field]['scan'] = scan  # all scans of field have same pointing
+                self.field_sources[field]['sources'] = []
+                self.field_sources[field]['ra_off'] = []
+                self.field_sources[field]['dec_off'] = []
+
+    def gaia_sources(self, min_plx_mas=None, update=False):
         """Find and save Gaia DR3 sources in FOV for specified scans.
 
         Sources are specified per field, which might be observed
         multiple times, so more efficient to save per field.
         """
+        self.init_field_sources(update=update)
+
+        for field in self.field_sources.keys():
+            if 'gaia' not in self.field_sources[field]['sources']:
+                ra_off, dec_off, _ = get_gaia_offsets(self.scan_info[self.field_sources[field]['scan']]['phase_center'][0],
+                                                      self.scan_info[self.field_sources[field]['scan']]['phase_center'][1],
+                                                      self.scan_info[self.field_sources[field]['scan']]['pb_hwhm'] * self.pb_factor,
+                                                      self.scan_info[self.field_sources[field]['scan']]['mean_time'],
+                                                      min_plx_mas=min_plx_mas)
+                self.field_sources[field]['sources'].append('gaia')
+                self.field_sources[field]['ra_off'].append(ra_off)
+                self.field_sources[field]['dec_off'].append(dec_off)
+                logging.info(f'found {len(ra_off)} gaia sources for field {field}')
+
+    def plot_sources(self, scans=None):
+        """Plot sources on a FITS file if it exists."""
         if scans is None:
             scans = [s for s in self.scan_info.keys()]
 
         for scan in scans:
             field = self.scan_info[scan]['field_id']
-            if field not in self.field_gaia.keys() or update:
-                ra_off, dec_off, r = get_gaia_offsets(self.scan_info[scan]['phase_center'][0],
-                                                      self.scan_info[scan]['phase_center'][1],
-                                                      self.scan_info[scan]['pb_hwhm'] * self.pb_factor,
-                                                      self.scan_info[scan]['mean_time'],
-                                                      min_plx_mas=min_plx_mas)
-                self.field_gaia[field] = {}
-                self.field_gaia[field]['ra_off'] = ra_off
-                self.field_gaia[field]['dec_off'] = dec_off
-                self.field_gaia[field]['table'] = r
-                logging.info(f'found {len(r)} sources for field {field}')
 
-            # plot with sources
             fits = (f"{self.scan_info[scan]['scan_dir']}/"
                     f"{self.scan_info[scan]['field_name']}_data.fits")
 
             if os.path.exists(fits):
                 plot_fits_sources(fits,
-                                  self.field_gaia[field]['table']['ra_ep'],
-                                  self.field_gaia[field]['table']['dec_ep'])
+                                  self.field_sources[field]['ra_off']*un.rad + self.scan_info[scan]['phase_center'][0],
+                                  self.field_sources[field]['dec_off']*un.rad + self.scan_info[scan]['phase_center'][1])
 
-    def gaia_matched_filter(self, scans=None, min_plx_mas=None):
+    def field_matched_filter(self, scans=None, min_plx_mas=None):
         """Run matched filter for Gaia sources in FOV."""
         if scans is None:
             scans = [s for s in self.scan_info.keys()]
@@ -1086,15 +1120,15 @@ class AlmaVar:
             if self.scan_info[scan]['nvis'] > 0:
                 field = self.scan_info[scan]['field_id']
 
-                if field not in self.field_gaia.keys():
-                    self.gaia_sources(scans=scans, min_plx_mas=min_plx_mas)
+                if field not in self.field_sources.keys():
+                    self.gaia_sources(min_plx_mas=min_plx_mas)
 
-                if len(self.field_gaia[field]['ra_off']) == 0:
+                if len(self.field_sources[field]['ra_off']) == 0:
                     continue
 
                 self.matched_filter(scans=[scan],
-                                    ra_off=self.field_gaia[field]['ra_off'],
-                                    dec_off=self.field_gaia[field]['dec_off'])
+                                    ra_off=self.field_sources[field]['ra_off'],
+                                    dec_off=self.field_sources[field]['dec_off'])
 
     def smooth_plot(self, times, v_in, det_snr, scan,
                     show_sig=True, ylab='$|Sum(V.w)|$',
